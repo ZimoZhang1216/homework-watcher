@@ -1,0 +1,379 @@
+# homework-watcher
+
+macOS 本地作业提醒系统。它只负责发现、记录、提醒和导出日历，不自动提交作业，不绕过验证码，也不保存明文密码。
+
+## 功能
+
+- 使用 SQLite 保存作业、截止时间和提醒记录。
+- 支持手动添加作业。
+- 支持从粘贴文本解析作业标题、课程、平台、截止时间。
+- 提供 `homework_watcher/platforms/changjiang_yuketang.py` 和 `homework_watcher/platforms/xiaoya.py` 两个平台适配器。
+- 支持 Playwright 读取“长江雨课堂”和“小雅”页面上的作业信息。
+- 支持 macOS 通知提醒。
+- 支持导出 `.ics` 文件并导入 Apple 日历。
+- 支持输出“今日截止、明日截止、逾期未提交”汇总。
+- 支持通过 launchd 定时运行。
+
+## 安装
+
+```bash
+cd "/Users/zhangzimo/Library/Mobile Documents/com~apple~CloudDocs/homework-watcher"
+./scripts/bootstrap.sh
+```
+
+如果你的终端提示 `externally-managed-environment`，这是 Homebrew Python 的系统环境保护。不要使用 `--break-system-packages`；本项目使用 `.venv` 本地虚拟环境安装。
+
+安装后先激活虚拟环境：
+
+```bash
+source .venv/bin/activate
+```
+
+之后可以使用 `hw` 命令。也可以不激活，直接使用：
+
+```bash
+.venv/bin/hw --help
+```
+
+如果后续修改了项目代码，重新运行 `./scripts/bootstrap.sh` 即可把当前代码重新安装进 `.venv`。
+
+默认数据库路径：
+
+```text
+~/.homework-watcher/homework.db
+```
+
+如果想指定数据库：
+
+```bash
+HW_DB_PATH=/path/to/homework.db hw list
+```
+
+## 常用命令
+
+手动添加作业：
+
+```bash
+hw add "大学物理实验报告" --course "大学物理" --platform "长江雨课堂" --due "2026-05-15 23:59"
+```
+
+列出未完成作业：
+
+```bash
+hw list
+```
+
+标记完成：
+
+```bash
+hw done 3
+```
+
+从粘贴文本导入：
+
+```bash
+hw import-text
+```
+
+第一次使用平台自动检查前，先手动登录。程序只打开浏览器并复用本地浏览器登录态，不读取、不保存、不提交你的密码：
+
+```bash
+hw login changjiang-yuketang
+hw login xiaoya
+```
+
+扫描平台作业并写入数据库：
+
+```bash
+hw scan
+```
+
+只扫描一个平台：
+
+```bash
+hw scan changjiang-yuketang
+hw scan xiaoya
+```
+
+以统一 JSON 格式查看平台适配器输出：
+
+```bash
+hw scan xiaoya --json
+```
+
+每条平台适配器结果包含：
+
+```json
+{
+  "title": "习题册第 3 章",
+  "course": "高等数学",
+  "platform": "小雅",
+  "due_at": "2026-05-15T23:59:00",
+  "status": "未提交",
+  "url": "https://example.test/homework/1"
+}
+```
+
+扫描后再检查提醒：
+
+```bash
+hw check --scan
+```
+
+也可以通过管道导入：
+
+```bash
+pbpaste | hw import-text
+```
+
+示例文本：
+
+```text
+课程：大学物理
+平台：长江雨课堂
+作业：大学物理实验报告
+截止时间：2026-05-15 23:59
+```
+
+检查提醒并输出汇总：
+
+```bash
+hw check
+```
+
+只输出汇总：
+
+```bash
+hw summary
+```
+
+预览未完成作业日报邮件：
+
+```bash
+hw email-report --dry-run
+```
+
+补齐固定每周作业：
+
+```bash
+hw sync-recurring
+```
+
+当前内置两条固定规则：`定量化学分析作业` 每周二 23:59 截止，`有机化学作业` 每周日 23:59 截止。`hw check` 会自动补齐未来 28 天内的固定作业，重复运行不会重复添加。
+
+导出 Apple 日历文件：
+
+```bash
+hw export-ics
+open ~/.homework-watcher/homework-watcher.ics
+```
+
+直接同步到 macOS Calendar：
+
+```bash
+hw sync-calendar
+```
+
+默认会写入名为 `作业提醒-iCloud` 的日历，只同步当前可完成待办作业。请先在 Calendar app 左侧 `iCloud` 分组下创建同名日历；如果同名日历不存在，程序会报错，不会自动创建本地 `On My Mac` 日历。
+
+通过 CalDAV 直接同步到 iCloud Calendar：
+
+```bash
+export ICLOUD_USERNAME="你的 Apple Account 邮箱"
+read -rsp "iCloud app-specific password: " ICLOUD_APP_PASSWORD; echo
+export ICLOUD_APP_PASSWORD
+hw sync-icloud-calendar
+```
+
+这里必须使用 Apple app-specific password，不要使用 Apple Account 主密码。默认 CalDAV 地址是 `https://caldav.icloud.com`，默认日历名仍是 `作业提醒-iCloud`。如果要指定日历名：
+
+```bash
+hw sync-icloud-calendar --calendar-name "作业提醒-iCloud"
+```
+
+直接同步到 macOS Reminders：
+
+```bash
+hw sync-reminders
+```
+
+默认会写入 Reminders 里的 `Reminders` 列表，只同步当前可完成待办作业。提醒事项名称格式为 `课程名称：作业名`，例如 `结构化学：作业-07`；从同步时间起三天内截止的作业会加警示前缀，例如 `⚠️ 结构化学：作业-07`。列表不存在时会自动创建；同步前会删除该列表里带有 `homework-watcher-id:` 标记的旧提醒事项，不会删除你手动创建的其他提醒事项。
+
+## 提醒规则
+
+- 新作业第一次出现时提醒。
+- 截止前 24 小时提醒。
+- 截止前 6 小时提醒。
+- 截止前 1 小时提醒。
+- 已逾期且未完成时提醒。逾期提醒按天去重，避免定时任务重复刷屏。
+
+`hw check` 每次只会对同一个作业触发当前最紧急且未发送过的一条临近截止提醒。
+
+长江雨课堂中状态为“未开始/未开放”的作业会被标记为 `不可完成的作业`。这类任务不会出现在默认 `hw list`、提醒检查和每日汇总中；需要查看完整记录时使用 `hw list --all`。
+
+## launchd 定时运行
+
+安装每 60 分钟运行一次的 LaunchAgent：
+
+```bash
+hw install-launchd
+```
+
+只写入 plist，不立即加载：
+
+```bash
+hw install-launchd --no-load
+```
+
+调整频率：
+
+```bash
+hw install-launchd --interval-minutes 30
+```
+
+让定时任务每次先扫描平台，再做本地提醒检查：
+
+```bash
+hw install-launchd --scan
+```
+
+每天早上 08:00 自动扫描、提醒，并同步到 Calendar 和 Reminders：
+
+```bash
+hw install-launchd --daily-at 08:00 --scan --calendar-sync --reminders-sync
+```
+
+如果你想使用别的日历名或提醒事项列表名：
+
+```bash
+hw install-launchd --daily-at 08:00 --scan --calendar-sync --calendar-name "作业提醒-iCloud" --reminders-sync --reminders-list "Reminders"
+```
+
+生成的文件默认位于：
+
+```text
+~/Library/LaunchAgents/com.local.homework-watcher.plist
+```
+
+日志位于：
+
+```text
+~/.homework-watcher/logs/
+```
+
+仓库中也提供了模板：
+
+```text
+launchd/com.local.homework-watcher.plist.template
+```
+
+## GitHub Actions 手动扫描
+
+仓库包含手动触发的 workflow：
+
+```text
+.github/workflows/scan-homework.yml
+```
+
+在 GitHub 页面进入 `Actions`，选择 `Scan homework`，点击 `Run workflow` 就会触发扫描。可以选择扫描全部平台、只扫描长江雨课堂，或只扫描小雅。
+
+这个 workflow 默认运行在 `self-hosted` + `macOS` runner 上。原因是平台扫描依赖本机浏览器登录态，登录态默认保存在：
+
+```text
+~/.homework-watcher/browser-profiles/
+```
+
+请先在同一个 macOS 用户下完成一次手动登录：
+
+```bash
+hw login changjiang-yuketang
+hw login xiaoya
+```
+
+GitHub 托管的 macOS runner 没有你的本地登录态，不能真正读取你账号里的作业；它通常只会提示需要登录。workflow 不需要也不会保存平台密码。
+
+## GitHub Actions 同步 iCloud Calendar
+
+仓库还包含云端 iCloud Calendar 同步 workflow：
+
+```text
+.github/workflows/icloud-calendar-sync.yml
+```
+
+它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发，通过 CalDAV 把当前数据库里的可完成作业写入 iCloud Calendar。它不依赖你的 Mac 开机，也不会写入 Apple Reminders。
+
+需要在 GitHub 仓库中配置 `Settings` -> `Secrets and variables` -> `Actions`：
+
+- Secret `ICLOUD_USERNAME`：你的 Apple Account 邮箱。
+- Secret `ICLOUD_APP_PASSWORD`：Apple app-specific password。
+- Variable `ICLOUD_CALENDAR_NAME`：可选，默认 `作业提醒-iCloud`。
+- Variable `ICLOUD_CALDAV_URL`：可选，默认 `https://caldav.icloud.com`。
+
+这个 workflow 会用 GitHub cache 保存 `.homework-watcher/homework.db`，所以作业标题、课程和截止时间会保存在 GitHub Actions cache 中；不会保存平台密码。平台扫描仍然需要有效浏览器登录态，GitHub 托管 runner 默认没有你的本地登录态，因此 workflow 的自动日历同步与平台自动扫描是两个不同问题。手动触发 workflow 时可以勾选 `run_scan` 做调试，但如果没有登录态，平台扫描会失败并提示重新登录。
+
+## GitHub Actions 邮件日报
+
+仓库包含每天发送未完成作业日报的 workflow：
+
+```text
+.github/workflows/email-homework-report.yml
+```
+
+它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发。邮件正文会包含未完成作业统计、逾期未提交、今日截止、明日截止和未来待办。运行前会自动补齐内置固定每周作业。
+
+需要在 GitHub 仓库中配置 `Settings` -> `Secrets and variables` -> `Actions`：
+
+- Secret `SMTP_HOST`：SMTP 服务器地址。
+- Secret `SMTP_PORT`：可选，默认 `587`。
+- Secret `SMTP_USERNAME`：SMTP 登录用户名。
+- Secret `SMTP_PASSWORD`：SMTP 密码或邮箱服务的 app password。
+- Secret `EMAIL_FROM`：可选，默认使用 `SMTP_USERNAME`。
+- Secret `EMAIL_TO`：收件邮箱；多个邮箱用英文逗号或分号分隔。
+- Secret `SMTP_SSL`：可选；465 端口通常设为 `1`。
+- Secret `SMTP_STARTTLS`：可选；默认 `1`，使用 587 端口时通常保持默认。
+
+这个 workflow 使用 GitHub cache 保存 `.homework-watcher/homework.db`。如果 GitHub runner 里还没有平台扫描数据，日报只会包含云端数据库已有的作业和内置固定每周作业；小雅和长江雨课堂的云端扫描登录态需要后续单独解决。先本地预览日报内容：
+
+```bash
+hw email-report --dry-run
+```
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+## 安全边界
+
+本项目不会实现自动提交作业，不会绕过验证码，不会保存明文密码。Playwright 适配器只读取页面上已经登录会话中可见的作业信息，提交动作仍由用户手动完成。
+
+## Playwright 登录态与错误处理
+
+Playwright 浏览器资料默认保存在：
+
+```text
+~/.homework-watcher/browser-profiles/
+```
+
+`hw login <platform>` 使用有界面的 Chromium 打开平台页面。你在浏览器中手动登录后按回车，cookies/localStorage 等登录态会保存在本地浏览器资料目录中。后续 `hw scan` 和 `hw check --scan` 会复用这个登录态。
+
+如果登录失效，程序会通过 macOS 通知提醒你重新运行：
+
+```bash
+hw login changjiang-yuketang
+hw login xiaoya
+```
+
+如果平台页面结构变化，适配器会报出清晰错误，包含当前页面 URL 和已尝试的选择器。此时可以先用有界面模式确认页面内容：
+
+```bash
+hw scan changjiang-yuketang --headed
+```
+
+默认入口可以用环境变量覆盖：
+
+```bash
+HW_CHANGJIANG_YUKETANG_URL="https://changjiang.yuketang.cn/v2/web/index" hw scan changjiang-yuketang
+HW_XIAOYA_URL="https://nankai.ai-augmented.com/app/jx-web/mycourse" hw scan xiaoya
+```

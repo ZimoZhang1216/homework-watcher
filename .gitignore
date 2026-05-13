@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+*.db
+*.sqlite
+*.sqlite3
+*.ics
+.venv/
+venv/
+*.egg-info/
+CONTINUE_NOTES.md
