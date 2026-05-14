@@ -4,8 +4,9 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
+import time
 from datetime import timedelta
+from pathlib import Path
 
 from .config import DEFAULT_DB_PATH, DEFAULT_ICS_PATH, DEFAULT_LAUNCHD_LABEL, db_path, ensure_app_dirs
 from .calendar_sync import DEFAULT_CALENDAR_NAME, list_calendars, sync_calendar
@@ -69,6 +70,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     login_parser = subparsers.add_parser("login", help="打开平台页面，手动登录并保存本地浏览器登录态")
     login_parser.add_argument("platform", help="平台：changjiang-yuketang/yuketang/长江雨课堂/xiaoya/小雅")
     login_parser.set_defaults(handler=cmd_login)
+
+    cloud_login_parser = subparsers.add_parser("cloud-login", help="在云端有界面浏览器中打开平台登录页并保持一段时间")
+    cloud_login_parser.add_argument("platforms", nargs="*", default=["all"], help="默认打开全部平台登录页")
+    cloud_login_parser.add_argument("--hold-minutes", type=int, default=30, help="浏览器保持打开的分钟数")
+    cloud_login_parser.set_defaults(handler=cmd_cloud_login)
 
     scan_parser = subparsers.add_parser("scan", help="使用 Playwright 从平台页面读取作业并写入数据库")
     scan_parser.add_argument("platforms", nargs="*", default=["all"], help="默认扫描全部平台")
@@ -230,6 +236,35 @@ def cmd_login(args) -> int:
     adapter = get_adapter(args.platform)
     adapter.manual_login()
     print(f"{adapter.platform_name} 登录态已保存在本地浏览器配置：{adapter.user_data_dir}")
+    return 0
+
+
+def cmd_cloud_login(args) -> int:
+    from .platforms import iter_adapters
+    from .platforms.base import PlaywrightUnavailableError, load_playwright, format_playwright_error
+
+    adapters = list(iter_adapters(args.platforms))
+    hold_seconds = max(1, args.hold_minutes) * 60
+    sync_playwright, playwright_error = load_playwright()
+    contexts = []
+    with sync_playwright() as playwright:
+        try:
+            for adapter in adapters:
+                context = adapter._launch_context(playwright, headless=False)
+                contexts.append((adapter, context))
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(adapter.url, wait_until="domcontentloaded", timeout=adapter.timeout_ms)
+                print(f"已打开 {adapter.platform_name} 登录页：{adapter.url}", flush=True)
+            print("请在远程浏览器中手动登录。程序不会读取、保存或提交你的密码。", flush=True)
+            print(f"浏览器会保持打开 {args.hold_minutes} 分钟；时间结束后会关闭并保存云端登录态。", flush=True)
+            time.sleep(hold_seconds)
+        except playwright_error as exc:
+            raise PlaywrightUnavailableError(format_playwright_error(exc)) from exc
+        finally:
+            for _, context in contexts:
+                context.close()
+    for adapter, _ in contexts:
+        print(f"{adapter.platform_name} 云端登录态已保存：{adapter.user_data_dir}")
     return 0
 
 

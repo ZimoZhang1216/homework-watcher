@@ -21,6 +21,7 @@ jobs:
     env:
       TZ: Asia/Shanghai
       HW_DB_PATH: ${{ github.workspace }}/.homework-watcher/homework.db
+      HW_BROWSER_PROFILE_ROOT: ${{ github.workspace }}/.homework-watcher/browser-profiles
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
       SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
@@ -37,13 +38,13 @@ jobs:
       - name: Prepare app directory
         run: mkdir -p .homework-watcher
 
-      - name: Restore homework database cache
+      - name: Restore cloud state cache
         uses: actions/cache/restore@v4
         with:
           path: .homework-watcher
-          key: homework-watcher-db-${{ github.run_id }}
+          key: homework-watcher-state-${{ github.run_id }}
           restore-keys: |
-            homework-watcher-db-
+            homework-watcher-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -54,6 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
+          python -m playwright install --with-deps chromium
 
       - name: Validate email secrets
         run: |
@@ -63,12 +65,19 @@ jobs:
           test -n "${SMTP_PASSWORD:-}" || { echo "Missing GitHub secret: SMTP_PASSWORD"; exit 1; }
           test -n "${EMAIL_TO:-}" || { echo "Missing GitHub secret: EMAIL_TO"; exit 1; }
 
+      - name: Scan platforms
+        run: |
+          set -euo pipefail
+          python -m homework_watcher scan --no-notify || {
+            echo "::warning::Platform scan failed. Sending email report from cached database and fixed weekly assignments."
+          }
+
       - name: Send email report
         run: python -m homework_watcher email-report
 
-      - name: Save homework database cache
+      - name: Save cloud state cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .homework-watcher
-          key: homework-watcher-db-${{ github.run_id }}
+          key: homework-watcher-state-${{ github.run_id }}

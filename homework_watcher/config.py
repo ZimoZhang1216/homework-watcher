@@ -8,7 +8,7 @@ APP_DIR = Path.home() / ".homework-watcher"
 DEFAULT_DB_PATH = APP_DIR / "homework.db"
 DEFAULT_ICS_PATH = APP_DIR / "homework-watcher.ics"
 DEFAULT_LOG_DIR = APP_DIR / "logs"
-DEFAULT_BROWSER_PROFILE_ROOT = APP_DIR / "browser-profiles"
+DEFAULT_BROWSER_PROFILE_ROOT = Path(os.environ.get("HW_BROWSER_PROFILE_ROOT", APP_DIR / "browser-profiles")).expanduser()
 DEFAULT_LAUNCHD_LABEL = "com.local.homework-watcher"
 
 

@@ -308,7 +308,39 @@ hw login changjiang-yuketang
 hw login xiaoya
 ```
 
-GitHub 托管的 macOS runner 没有你的本地登录态，不能真正读取你账号里的作业；它通常只会提示需要登录。workflow 不需要也不会保存平台密码。
+GitHub 托管 runner 没有你的本地登录态。如果要在云端扫描，需要先用下面的 `Cloud platform login` workflow 建立云端浏览器登录态。
+
+## GitHub Actions 云端登录态
+
+仓库包含手动建立云端浏览器登录态的 workflow：
+
+```text
+.github/workflows/cloud-platform-login.yml
+```
+
+在 GitHub 页面进入 `Actions`，选择 `Cloud platform login`，点击 `Run workflow`。第一次建议选择 `all`，并把 `hold_minutes` 设为 `30` 或更长。
+
+运行到 `Open tmate session` 时，日志里会出现一条 SSH 命令。复制它，并在你的 Mac 终端里加上端口转发，例如：
+
+```bash
+ssh -L 6080:localhost:6080 <日志里 tmate 给出的其余 SSH 参数>
+```
+
+连接成功后，在 SSH 会话里运行：
+
+```bash
+/tmp/start-homework-login.sh
+```
+
+然后在本机浏览器打开：
+
+```text
+http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+```
+
+你会看到 GitHub runner 上的远程浏览器。手动登录小雅和长江雨课堂；程序不会读取、保存或提交你的密码，也不会绕过验证码。等 `/tmp/start-homework-login.sh` 结束后，退出 SSH 会话，workflow 会把云端浏览器登录态保存到 GitHub Actions cache。
+
+注意：云端浏览器登录态包含 cookies/session，安全级别接近“已登录会话”。它保存在 GitHub Actions cache 中，不是明文密码，但仍应视为敏感数据。登录态也可能因为验证码、异地 IP 或平台风控而失效，失效后需要重新运行这个 workflow。
 
 ## GitHub Actions 同步 iCloud Calendar
 
@@ -350,7 +382,7 @@ GitHub 托管的 macOS runner 没有你的本地登录态，不能真正读取�
 - Secret `SMTP_SSL`：可选；465 端口通常设为 `1`。
 - Secret `SMTP_STARTTLS`：可选；默认 `1`，使用 587 端口时通常保持默认。
 
-这个 workflow 使用 GitHub cache 保存 `.homework-watcher/homework.db`。如果 GitHub runner 里还没有平台扫描数据，日报只会包含云端数据库已有的作业和本周内截止的内置固定作业；小雅和长江雨课堂的云端扫描登录态需要后续单独解决。先本地预览日报内容：
+这个 workflow 会先尝试使用 GitHub Actions cache 中的云端浏览器登录态扫描小雅和长江雨课堂，再发送日报。如果扫描失败，会继续用云端数据库已有作业和本周内截止的内置固定作业发送日报，并在 Actions 日志里输出 warning。先本地预览日报内容：
 
 ```bash
 hw email-report --dry-run

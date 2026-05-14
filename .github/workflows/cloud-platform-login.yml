@@ -1,0 +1,118 @@
+name: Cloud platform login
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform login page to open.
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - changjiang-yuketang
+          - xiaoya
+      hold_minutes:
+        description: Minutes to keep the remote browser open.
+        required: true
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homework-watcher-cloud-login
+  cancel-in-progress: false
+
+jobs:
+  cloud-login:
+    name: Create cloud browser login state
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      TZ: Asia/Shanghai
+      HW_DB_PATH: ${{ github.workspace }}/.homework-watcher/homework.db
+      HW_BROWSER_PROFILE_ROOT: ${{ github.workspace }}/.homework-watcher/browser-profiles
+      DISPLAY: ":99"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare app directory
+        run: mkdir -p .homework-watcher
+
+      - name: Restore cloud state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .homework-watcher
+          key: homework-watcher-state-${{ github.run_id }}
+          restore-keys: |
+            homework-watcher-state-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Install browser and remote desktop tools
+        run: |
+          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y xvfb fluxbox x11vnc novnc websockify
+
+      - name: Start remote desktop
+        run: |
+          set -euo pipefail
+          Xvfb "$DISPLAY" -screen 0 1440x1000x24 > /tmp/xvfb.log 2>&1 &
+          sleep 2
+          fluxbox > /tmp/fluxbox.log 2>&1 &
+          x11vnc -display "$DISPLAY" -localhost -nopw -forever -shared -bg -o /tmp/x11vnc.log
+          websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900 > /tmp/novnc.log 2>&1 &
+
+      - name: Prepare cloud login command
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          HOLD_MINUTES: ${{ inputs.hold_minutes }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/start-homework-login.sh <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          export DISPLAY="$DISPLAY"
+          export HW_DB_PATH="$HW_DB_PATH"
+          export HW_BROWSER_PROFILE_ROOT="$HW_BROWSER_PROFILE_ROOT"
+          python -m homework_watcher cloud-login "$PLATFORM" --hold-minutes "$HOLD_MINUTES"
+          EOF
+          chmod +x /tmp/start-homework-login.sh
+
+      - name: Remote login instructions
+        run: |
+          cat <<'EOF'
+          1. In the next tmate step, copy the SSH command printed in the log.
+          2. On your Mac, add port forwarding to it:
+             ssh -L 6080:localhost:6080 <the-rest-of-the-tmate-command>
+          3. In the SSH session, run:
+             /tmp/start-homework-login.sh
+          4. Open this local URL:
+             http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+          5. Log in to the opened platform pages manually.
+          6. Wait until /tmp/start-homework-login.sh finishes, then close the SSH session.
+          7. This workflow will then save the cloud browser login state cache.
+          EOF
+
+      - name: Open tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Save cloud state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .homework-watcher
+          key: homework-watcher-state-${{ github.run_id }}
