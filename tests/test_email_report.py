@@ -58,11 +58,16 @@ class EmailReportTests(unittest.TestCase):
 
         self.assertEqual(subject, "作业日报 2026-05-15：待办 3，今日 1，明日 0，逾期 1")
         self.assertIn("逾期未提交：", body)
-        self.assertIn("课程：结构化学 | 作业：逾期作业 | 平台：小雅 | 截止日期：2026-05-14 23:59", body)
+        overdue_line = "1. 课程：结构化学 | 作业：逾期作业 | 平台：小雅 | 截止日期：2026-05-14 23:59 [距今：已逾期12小时1分钟]"
+        today_line = "2. 课程：大学物理 | 作业：今日作业 | 平台：长江雨课堂 | 截止日期：2026-05-15 23:59 [距今：11小时59分钟]"
+        future_line = "3. 课程：有机化学 | 作业：有机化学作业 | 平台：线下 | 截止日期：2026-05-17 23:59 [距今：2天11小时59分钟]"
+        self.assertIn(overdue_line, body)
         self.assertIn("今日截止：", body)
-        self.assertIn("课程：大学物理 | 作业：今日作业 | 平台：长江雨课堂 | 截止日期：2026-05-15 23:59", body)
+        self.assertIn(today_line, body)
         self.assertIn("未来待办：", body)
-        self.assertIn("课程：有机化学 | 作业：有机化学作业 | 平台：线下 | 截止日期：2026-05-17 23:59", body)
+        self.assertIn(future_line, body)
+        self.assertLess(body.index(overdue_line), body.index(today_line))
+        self.assertLess(body.index(today_line), body.index(future_line))
         self.assertNotIn("下周固定作业", body)
         self.assertNotIn("已完成作业", body)
         self.assertNotIn("链接：", body)

@@ -101,13 +101,14 @@ def build_email_report(assignments: list[Assignment], *, now: datetime | None = 
         ("明日截止", [item for item in pending if item.due_at.date() == now.date() + timedelta(days=1)]),
         ("未来待办", [item for item in pending if item.due_at.date() > now.date() + timedelta(days=1)]),
     ]
+    item_numbers = {id(item): number for number, item in enumerate(pending, start=1)}
     for title, items in sections:
         lines.append(f"{title}：")
         if not items:
             lines.append("  无")
         else:
             for item in items:
-                lines.append(format_assignment_line(item, now=now))
+                lines.append(format_assignment_line(item, now=now, number=item_numbers[id(item)]))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -124,14 +125,35 @@ def assignment_stats(assignments: list[Assignment], *, now: datetime) -> dict[st
     }
 
 
-def format_assignment_line(assignment: Assignment, *, now: datetime) -> str:
+def format_assignment_line(assignment: Assignment, *, now: datetime, number: int | None = None) -> str:
     parts = [
         f"课程：{assignment.course or '未填写'}",
         f"作业：{assignment.title}",
         f"平台：{display_platform(assignment)}",
         f"截止日期：{human_datetime(assignment.due_at)}",
     ]
-    return "  " + " | ".join(parts)
+    prefix = f"{number}. " if number is not None else ""
+    return f"  {prefix}" + " | ".join(parts) + f" [{relative_due_label(assignment.due_at, now=now)}]"
+
+
+def relative_due_label(due_at: datetime, *, now: datetime) -> str:
+    if due_at >= now:
+        return "距今：" + human_duration(due_at - now)
+    return "距今：已逾期" + human_duration(now - due_at)
+
+
+def human_duration(delta: timedelta) -> str:
+    total_minutes = max(0, int(delta.total_seconds() // 60))
+    days, remainder = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}天")
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes or not parts:
+        parts.append(f"{minutes}分钟")
+    return "".join(parts)
 
 
 def filter_report_assignments(assignments: list[Assignment], *, now: datetime) -> list[Assignment]:
