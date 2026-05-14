@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from homework_watcher.calendar_sync import applescript_quote, build_calendar_sync_script
+from homework_watcher.cronjob import build_cron_entry, build_email_report_script, replace_managed_block
 from homework_watcher.icloud_calendar_sync import build_caldav_event
 from homework_watcher.launchd import build_launchd_plist, parse_daily_at
 from homework_watcher.models import Assignment
@@ -64,6 +66,29 @@ class CalendarAndLaunchdTests(unittest.TestCase):
         self.assertNotIn("StartInterval", plist)
         self.assertIn("--calendar-sync", plist["ProgramArguments"][2])
         self.assertIn("--reminders-sync", plist["ProgramArguments"][2])
+
+    def test_cron_entry_and_script_run_scan_then_email_report(self):
+        entry = build_cron_entry(
+            daily_at="08:00",
+            script_path=Path("/tmp/homework watcher/run-email.sh"),
+            log_path=Path("/tmp/homework-watcher.log"),
+        )
+        script = build_email_report_script(
+            project_dir=Path("/tmp/homework watcher"),
+            python_path=Path("/tmp/homework watcher/.venv/bin/python"),
+            env_file=Path("/tmp/email.env"),
+        )
+        crontab = replace_managed_block("SHELL=/bin/zsh\n", name="homework-watcher-test", entry=entry)
+
+        self.assertEqual(
+            entry,
+            "0 8 * * * /bin/zsh '/tmp/homework watcher/run-email.sh' >> /tmp/homework-watcher.log 2>&1",
+        )
+        self.assertIn("source /tmp/email.env", script)
+        self.assertIn("-m homework_watcher scan --no-notify", script)
+        self.assertIn("-m homework_watcher email-report", script)
+        self.assertIn("# BEGIN homework-watcher-test managed by homework-watcher", crontab)
+        self.assertIn(entry, crontab)
 
     def test_reminders_script_contains_list_marker_and_due_date(self):
         assignment = Assignment(

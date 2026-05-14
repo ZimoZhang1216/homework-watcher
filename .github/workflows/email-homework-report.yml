@@ -2,9 +2,6 @@ name: Email homework report
 
 on:
   workflow_dispatch:
-  schedule:
-    # 08:00 Asia/Shanghai.
-    - cron: "0 0 * * *"
 
 permissions:
   contents: read

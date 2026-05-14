@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import DEFAULT_DB_PATH, DEFAULT_ICS_PATH, DEFAULT_LAUNCHD_LABEL, db_path, ensure_app_dirs
 from .calendar_sync import DEFAULT_CALENDAR_NAME, list_calendars, sync_calendar
+from .cronjob import DEFAULT_CRON_ENV_PATH, DEFAULT_CRON_NAME, install_cron, uninstall_cron
 from .datetime_utils import human_datetime, now_local, parse_datetime
 from .db import HomeworkDB
 from .email_report import build_email_report, build_email_subject, email_config_from_env, send_email_report
@@ -152,6 +153,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     launchd_parser.add_argument("--reminders-list", default=DEFAULT_REMINDERS_LIST_NAME, help="Reminders 列表名称")
     launchd_parser.add_argument("--no-load", action="store_true", help="只写 plist，不立即加载")
     launchd_parser.set_defaults(handler=cmd_install_launchd)
+
+    cron_parser = subparsers.add_parser("install-cron", help="安装本地 cron 邮件日报任务")
+    cron_parser.add_argument("--name", default=DEFAULT_CRON_NAME, help="crontab 托管块名称")
+    cron_parser.add_argument("--daily-at", default="08:00", help="每天固定时间运行，格式 HH:MM，例如 08:00")
+    cron_parser.add_argument("--env-file", type=Path, default=DEFAULT_CRON_ENV_PATH, help="SMTP 环境变量文件")
+    cron_parser.add_argument("--no-scan", action="store_true", help="发送邮件前不扫描平台")
+    cron_parser.add_argument("--remove", action="store_true", help="删除 homework-watcher 管理的 cron 任务")
+    cron_parser.set_defaults(handler=cmd_install_cron)
 
     return parser
 
@@ -471,6 +480,24 @@ def cmd_install_launchd(args) -> int:
     )
     action = "写入并加载" if not args.no_load else "写入"
     print(f"已{action} launchd 配置：{path}")
+    return 0
+
+
+def cmd_install_cron(args) -> int:
+    if args.remove:
+        removed = uninstall_cron(name=args.name)
+        print("已删除 cron 邮件日报任务。" if removed else "未找到 homework-watcher 管理的 cron 任务。")
+        return 0
+    result = install_cron(
+        name=args.name,
+        daily_at=args.daily_at,
+        env_file=args.env_file,
+        scan=not args.no_scan,
+    )
+    print(f"已安装 cron 邮件日报任务：每天 {args.daily_at}")
+    print(f"脚本：{result.script_path}")
+    print(f"日志：{result.log_path}")
+    print(f"SMTP 配置文件：{result.env_file}")
     return 0
 
 

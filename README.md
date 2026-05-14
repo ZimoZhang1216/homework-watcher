@@ -12,7 +12,7 @@ macOS 本地作业提醒系统。它只负责发现、记录、提醒和导出�
 - 支持 macOS 通知提醒。
 - 支持导出 `.ics` 文件并导入 Apple 日历。
 - 支持输出“今日截止、明日截止、逾期未提交”汇总。
-- 支持通过 launchd 定时运行。
+- 支持通过 cronjob 或 launchd 定时运行。
 
 ## 安装
 
@@ -227,6 +227,49 @@ hw sync-reminders
 .venv/bin/python -m homework_watcher check --scan --calendar-sync --calendar-name "作业提醒-iCloud" --reminders-sync --reminders-list "Reminders"
 ```
 
+## cronjob 邮件日报
+
+如果不想依赖 GitHub Actions 的定时触发，可以用本机 cronjob 每天发送邮件日报。下面命令会安装一个 crontab 条目，每天本机时间 08:00 运行；任务会先扫描平台，再发送邮件日报：
+
+```bash
+hw install-cron --daily-at 08:00
+```
+
+cron 不会读取你当前终端里的临时环境变量。请把 SMTP 配置写到下面这个本地文件，文件内容使用 `KEY=value` 格式：
+
+```text
+~/.homework-watcher/email.env
+```
+
+示例：
+
+```bash
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-email@example.com
+SMTP_PASSWORD=your-smtp-password-or-app-password
+EMAIL_TO=your-email@example.com
+SMTP_STARTTLS=1
+```
+
+查看已安装的 cronjob：
+
+```bash
+crontab -l
+```
+
+查看 cronjob 日志：
+
+```bash
+tail -f ~/.homework-watcher/logs/homework-watcher-email-report.log
+```
+
+删除这个项目管理的 cronjob：
+
+```bash
+hw install-cron --remove
+```
+
 ## launchd 定时运行
 
 当前本机自动运行已停用。如需重新启用，再运行下面的 `hw install-launchd ...` 命令。
@@ -366,7 +409,7 @@ NOVNC_PASSWORD
 .github/workflows/email-homework-report.yml
 ```
 
-它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发。邮件正文会包含未完成作业统计、逾期未提交、今日截止、明日截止和未来待办。作业条目只包含课程名、作业名、平台和截止日期，例如：`课程：定量化学分析 | 作业：定量化学分析作业 | 平台：飞书私信助教 | 截止日期：2026-05-19 23:59`。运行前会自动补齐内置固定每周作业，但日报中只展示本周内截止的固定作业。
+这个 workflow 只保留手动触发，用来调试云端扫描和发信；每天 08:00 的正式触发改由本机 cronjob 执行。邮件正文会包含未完成作业统计、逾期未提交、今日截止、明日截止和未来待办。作业条目只包含课程名、作业名、平台和截止日期，例如：`课程：定量化学分析 | 作业：定量化学分析作业 | 平台：飞书私信助教 | 截止日期：2026-05-19 23:59`。运行前会自动补齐内置固定每周作业，但日报中只展示本周内截止的固定作业。
 
 需要在 GitHub 仓库中配置 `Settings` -> `Secrets and variables` -> `Actions`：
 
