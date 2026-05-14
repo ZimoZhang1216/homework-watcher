@@ -152,7 +152,43 @@ class DBAndReminderTests(unittest.TestCase):
                 self.assertEqual(len(repeated), 0)
                 by_course = {item.course: item for item in db.list_assignments()}
                 self.assertEqual(by_course["有机化学"].due_at, datetime(2026, 5, 17, 23, 59))
+                self.assertEqual(by_course["有机化学"].platform, "线下")
                 self.assertEqual(by_course["定量化学分析"].due_at, datetime(2026, 5, 19, 23, 59))
+                self.assertEqual(by_course["定量化学分析"].platform, "飞书私信助教")
+            finally:
+                db.close()
+
+    def test_recurring_assignments_do_not_duplicate_legacy_fixed_platform_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = HomeworkDB(Path(tmp) / "homework.db")
+            try:
+                db.add_assignment(
+                    title="有机化学作业",
+                    course="有机化学",
+                    platform="固定作业",
+                    due_at=datetime(2026, 5, 17, 23, 59),
+                    status="未提交",
+                    source_text="recurring:organic-chemistry-weekly:2026-05-17",
+                )
+
+                generated = materialize_recurring_assignments(
+                    db,
+                    now=datetime(2026, 5, 13, 12, 0),
+                    horizon_days=7,
+                )
+
+                assignments = db.list_assignments(include_done=True)
+                organic_rows = [
+                    item
+                    for item in assignments
+                    if item.title == "有机化学作业"
+                    and item.course == "有机化学"
+                    and item.due_at == datetime(2026, 5, 17, 23, 59)
+                ]
+                self.assertEqual(len(generated), 1)
+                self.assertEqual(generated[0].course, "定量化学分析")
+                self.assertEqual(len(assignments), 2)
+                self.assertEqual(len(organic_rows), 1)
             finally:
                 db.close()
 

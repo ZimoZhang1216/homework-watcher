@@ -17,6 +17,7 @@ class RecurringAssignmentRule:
     slug: str
     title: str
     course: str
+    platform: str
     weekday: int
     due_time: time
 
@@ -26,6 +27,7 @@ DEFAULT_RECURRING_RULES = [
         slug="quantitative-analysis-weekly",
         title="定量化学分析作业",
         course="定量化学分析",
+        platform="飞书私信助教",
         weekday=1,
         due_time=time(23, 59),
     ),
@@ -33,6 +35,7 @@ DEFAULT_RECURRING_RULES = [
         slug="organic-chemistry-weekly",
         title="有机化学作业",
         course="有机化学",
+        platform="线下",
         weekday=6,
         due_time=time(23, 59),
     ),
@@ -50,10 +53,13 @@ def materialize_recurring_assignments(
     generated: list[Assignment] = []
     for rule in rules or DEFAULT_RECURRING_RULES:
         for due_at in iter_due_times(rule, now=current, horizon_days=horizon_days):
+            existing = db.find_by_title_course_due(title=rule.title, course=rule.course, due_at=due_at)
+            if existing is not None:
+                continue
             assignment, created = db.add_assignment(
                 title=rule.title,
                 course=rule.course,
-                platform=RECURRING_PLATFORM,
+                platform=rule.platform,
                 due_at=due_at,
                 status="未提交",
                 source_text=f"recurring:{rule.slug}:{due_at.date().isoformat()}",

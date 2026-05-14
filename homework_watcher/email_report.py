@@ -8,8 +8,7 @@ from email.message import EmailMessage
 
 from .datetime_utils import human_datetime, now_local
 from .models import Assignment
-from .recurring_assignments import RECURRING_PLATFORM
-from .reminders_sync import name_for_reminder
+from .recurring_assignments import DEFAULT_RECURRING_RULES, RECURRING_PLATFORM
 
 
 DEFAULT_SMTP_PORT = 587
@@ -126,15 +125,12 @@ def assignment_stats(assignments: list[Assignment], *, now: datetime) -> dict[st
 
 
 def format_assignment_line(assignment: Assignment, *, now: datetime) -> str:
-    parts = [name_for_reminder(assignment, now=now), f"截止：{human_datetime(assignment.due_at)}"]
-    if assignment.platform:
-        parts.append(f"平台：{assignment.platform}")
-    if assignment.status:
-        parts.append(f"状态：{assignment.status}")
-    if assignment.url:
-        parts.append(f"链接：{assignment.url}")
-    if assignment.due_at < now:
-        parts.append("已逾期")
+    parts = [
+        f"课程：{assignment.course or '未填写'}",
+        f"作业：{assignment.title}",
+        f"平台：{display_platform(assignment)}",
+        f"截止日期：{human_datetime(assignment.due_at)}",
+    ]
     return "  " + " | ".join(parts)
 
 
@@ -147,7 +143,25 @@ def filter_report_assignments(assignments: list[Assignment], *, now: datetime) -
 
 
 def is_recurring_assignment(assignment: Assignment) -> bool:
-    return assignment.platform == RECURRING_PLATFORM
+    if assignment.platform == RECURRING_PLATFORM:
+        return True
+    if (assignment.source_text or "").startswith("recurring:"):
+        return True
+    return recurring_rule_for(assignment) is not None
+
+
+def display_platform(assignment: Assignment) -> str:
+    if assignment.platform != RECURRING_PLATFORM:
+        return assignment.platform or "未填写"
+    rule = recurring_rule_for(assignment)
+    return rule.platform if rule is not None else assignment.platform
+
+
+def recurring_rule_for(assignment: Assignment):
+    for rule in DEFAULT_RECURRING_RULES:
+        if assignment.course == rule.course and assignment.title == rule.title:
+            return rule
+    return None
 
 
 def due_this_week(assignment: Assignment, *, now: datetime) -> bool:

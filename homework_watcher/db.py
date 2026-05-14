@@ -125,6 +125,18 @@ class HomeworkDB:
         row = self.conn.execute("SELECT * FROM assignments WHERE fingerprint = ?", (fingerprint,)).fetchone()
         return row_to_assignment(row) if row else None
 
+    def find_by_title_course_due(self, *, title: str, course: str, due_at: datetime) -> Assignment | None:
+        row = self.conn.execute(
+            """
+            SELECT * FROM assignments
+            WHERE title = ? AND course = ? AND due_at = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (clean_text(title), clean_text(course), to_iso(due_at)),
+        ).fetchone()
+        return row_to_assignment(row) if row else None
+
     def list_assignments(self, *, include_done: bool = False) -> list[Assignment]:
         where = "" if include_done else "WHERE completed_at IS NULL AND status != '不可完成的作业'"
         rows = self.conn.execute(
