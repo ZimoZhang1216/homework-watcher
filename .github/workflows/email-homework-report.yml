@@ -72,6 +72,9 @@ jobs:
             echo "::warning::Platform scan failed. Sending email report from cached database and fixed weekly assignments."
           }
 
+      - name: Preview email report
+        run: python -m homework_watcher email-report --dry-run
+
       - name: Send email report
         run: python -m homework_watcher email-report
 

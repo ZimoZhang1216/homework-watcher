@@ -45,6 +45,11 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         *DEFAULT_CANDIDATE_SELECTORS,
     ]
 
+    def _launch_context(self, playwright, *, headless: bool):
+        context = super()._launch_context(playwright, headless=headless)
+        prefer_student_course_tab(context)
+        return context
+
     def fetch_assignments(
         self,
         *,
@@ -59,6 +64,8 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                 emit_progress(progress, f"{self.platform_name}：打开课程列表")
                 page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 self.wait_until_ready(page)
+                ensure_student_course_tab(page)
+                self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
                 if self.is_login_required(page):
                     raise LoginRequiredError(
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
@@ -75,6 +82,8 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                     )
                     page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                     self.wait_until_ready(page)
+                    ensure_student_course_tab(page)
+                    self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
                     go_to_course_page(page, course_entry.page_number)
                     card = page.locator(".aia_course_card").filter(has_text=course_name).first
                     if card.count() == 0:
@@ -115,6 +124,41 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 def fetch_assignments(*, headless: bool = True, progress: ProgressCallback = None):
     """Fetch assignments from Xiaoya without submitting anything."""
     return XiaoyaAdapter().fetch_assignments(headless=headless, progress=progress)
+
+
+def prefer_student_course_tab(context) -> None:
+    context.add_init_script(
+        """
+        (() => {
+          try {
+            if (!location.hostname.endsWith("ai-augmented.com")) return;
+            sessionStorage.setItem("course_home_tabs_current", "study");
+          } catch (_) {}
+        })();
+        """
+    )
+
+
+def ensure_student_course_tab(page) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              sessionStorage.setItem("course_home_tabs_current", "study");
+              const tabs = Array.from(document.querySelectorAll("[role='tab'], .ant-tabs-tab, .ant-tabs-tab-btn"));
+              const target = tabs.find((node) => /我.*(听|学).*(课|课程)/.test((node.innerText || "").trim()));
+              if (target) {
+                const tab = target.closest("[role='tab'], .ant-tabs-tab") || target;
+                const selected = tab.getAttribute("aria-selected") === "true"
+                  || tab.classList.contains("ant-tabs-tab-active");
+                if (!selected) tab.click();
+              }
+            }
+            """
+        )
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
 
 
 def collect_visible_course_names(page) -> list[str]:
