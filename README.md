@@ -211,7 +211,23 @@ hw sync-reminders
 
 长江雨课堂中状态为“未开始/未开放”的作业会被标记为 `不可完成的作业`。这类任务不会出现在默认 `hw list`、提醒检查和每日汇总中；需要查看完整记录时使用 `hw list --all`。
 
+## 手动运行
+
+如果不想在本机定时自动运行，可以用仓库里的脚本手动触发一次完整检查：
+
+```bash
+./scripts/run-now.sh
+```
+
+这个脚本会执行平台扫描、本地提醒检查、同步 `作业提醒-iCloud` 日历，并同步 Reminders 里的 `Reminders` 列表。它等价于：
+
+```bash
+.venv/bin/python -m homework_watcher check --scan --calendar-sync --calendar-name "作业提醒-iCloud" --reminders-sync --reminders-list "Reminders"
+```
+
 ## launchd 定时运行
+
+当前本机自动运行已停用。如需重新启用，再运行下面的 `hw install-launchd ...` 命令。
 
 安装每 60 分钟运行一次的 LaunchAgent：
 
