@@ -8,6 +8,8 @@ from email.message import EmailMessage
 
 from .datetime_utils import human_datetime, now_local
 from .models import Assignment
+from .recurring_assignments import RECURRING_PLATFORM
+from .reminders_sync import name_for_reminder
 
 
 DEFAULT_SMTP_PORT = 587
@@ -72,7 +74,8 @@ def truthy(value: str) -> bool:
 
 def build_email_subject(assignments: list[Assignment], *, now: datetime | None = None) -> str:
     now = now or now_local()
-    stats = assignment_stats(assignments, now=now)
+    report_assignments = filter_report_assignments(assignments, now=now)
+    stats = assignment_stats(report_assignments, now=now)
     return (
         f"作业日报 {now.date().isoformat()}："
         f"待办 {stats['total']}，今日 {stats['today']}，明日 {stats['tomorrow']}，逾期 {stats['overdue']}"
@@ -81,7 +84,10 @@ def build_email_subject(assignments: list[Assignment], *, now: datetime | None =
 
 def build_email_report(assignments: list[Assignment], *, now: datetime | None = None) -> str:
     now = now or now_local()
-    pending = sorted([item for item in assignments if not item.is_done], key=lambda item: (item.due_at, item.id or 0))
+    pending = sorted(
+        filter_report_assignments(assignments, now=now),
+        key=lambda item: (item.due_at, item.id or 0),
+    )
     stats = assignment_stats(pending, now=now)
 
     lines = [
@@ -120,18 +126,35 @@ def assignment_stats(assignments: list[Assignment], *, now: datetime) -> dict[st
 
 
 def format_assignment_line(assignment: Assignment, *, now: datetime) -> str:
-    parts = [f"#{assignment.id}" if assignment.id is not None else "#?", human_datetime(assignment.due_at)]
-    meta = " / ".join(part for part in [assignment.course, assignment.platform] if part)
-    if meta:
-        parts.append(f"[{meta}]")
-    parts.append(assignment.title)
+    parts = [name_for_reminder(assignment, now=now), f"截止：{human_datetime(assignment.due_at)}"]
+    if assignment.platform:
+        parts.append(f"平台：{assignment.platform}")
     if assignment.status:
         parts.append(f"状态：{assignment.status}")
     if assignment.url:
         parts.append(f"链接：{assignment.url}")
     if assignment.due_at < now:
         parts.append("已逾期")
-    return "  " + " ".join(parts)
+    return "  " + " | ".join(parts)
+
+
+def filter_report_assignments(assignments: list[Assignment], *, now: datetime) -> list[Assignment]:
+    return [
+        item
+        for item in assignments
+        if not item.is_done and (not is_recurring_assignment(item) or due_this_week(item, now=now))
+    ]
+
+
+def is_recurring_assignment(assignment: Assignment) -> bool:
+    return assignment.platform == RECURRING_PLATFORM
+
+
+def due_this_week(assignment: Assignment, *, now: datetime) -> bool:
+    start = now.date() - timedelta(days=now.weekday())
+    end = start + timedelta(days=7)
+    due_date = assignment.due_at.date()
+    return start <= due_date < end
 
 
 def send_email_report(

@@ -153,6 +153,8 @@ hw summary
 hw email-report --dry-run
 ```
 
+日报里的作业条目使用类似 Reminders 的名称格式：`课程名称：作业名`；三天内截止会加 `⚠️` 前缀。固定每周作业在日报中只展示本周内截止的条目。
+
 补齐固定每周作业：
 
 ```bash
@@ -335,7 +337,7 @@ GitHub 托管的 macOS runner 没有你的本地登录态，不能真正读取�
 .github/workflows/email-homework-report.yml
 ```
 
-它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发。邮件正文会包含未完成作业统计、逾期未提交、今日截止、明日截止和未来待办。运行前会自动补齐内置固定每周作业。
+它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发。邮件正文会包含未完成作业统计、逾期未提交、今日截止、明日截止和未来待办。作业条目使用类似 Reminders 的 `课程名称：作业名` 格式；三天内截止会加 `⚠️` 前缀。运行前会自动补齐内置固定每周作业，但日报中只展示本周内截止的固定作业。
 
 需要在 GitHub 仓库中配置 `Settings` -> `Secrets and variables` -> `Actions`：
 
@@ -348,7 +350,7 @@ GitHub 托管的 macOS runner 没有你的本地登录态，不能真正读取�
 - Secret `SMTP_SSL`：可选；465 端口通常设为 `1`。
 - Secret `SMTP_STARTTLS`：可选；默认 `1`，使用 587 端口时通常保持默认。
 
-这个 workflow 使用 GitHub cache 保存 `.homework-watcher/homework.db`。如果 GitHub runner 里还没有平台扫描数据，日报只会包含云端数据库已有的作业和内置固定每周作业；小雅和长江雨课堂的云端扫描登录态需要后续单独解决。先本地预览日报内容：
+这个 workflow 使用 GitHub cache 保存 `.homework-watcher/homework.db`。如果 GitHub runner 里还没有平台扫描数据，日报只会包含云端数据库已有的作业和本周内截止的内置固定作业；小雅和长江雨课堂的云端扫描登录态需要后续单独解决。先本地预览日报内容：
 
 ```bash
 hw email-report --dry-run

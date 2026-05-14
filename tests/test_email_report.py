@@ -29,10 +29,18 @@ class EmailReportTests(unittest.TestCase):
             ),
             Assignment(
                 id=3,
-                title="未来作业",
+                title="有机化学作业",
                 course="有机化学",
                 platform="固定作业",
-                due_at=datetime(2026, 5, 18, 23, 59),
+                due_at=datetime(2026, 5, 17, 23, 59),
+                status="未提交",
+            ),
+            Assignment(
+                id=5,
+                title="下周固定作业",
+                course="定量化学分析",
+                platform="固定作业",
+                due_at=datetime(2026, 5, 19, 23, 59),
                 status="未提交",
             ),
             Assignment(
@@ -50,11 +58,12 @@ class EmailReportTests(unittest.TestCase):
 
         self.assertEqual(subject, "作业日报 2026-05-15：待办 3，今日 1，明日 0，逾期 1")
         self.assertIn("逾期未提交：", body)
-        self.assertIn("#1 2026-05-14 23:59 [结构化学 / 小雅] 逾期作业", body)
+        self.assertIn("结构化学：逾期作业 | 截止：2026-05-14 23:59 | 平台：小雅", body)
         self.assertIn("今日截止：", body)
-        self.assertIn("#2 2026-05-15 23:59 [大学物理 / 长江雨课堂] 今日作业", body)
+        self.assertIn("⚠️ 大学物理：今日作业 | 截止：2026-05-15 23:59 | 平台：长江雨课堂", body)
         self.assertIn("未来待办：", body)
-        self.assertIn("#3 2026-05-18 23:59 [有机化学 / 固定作业] 未来作业", body)
+        self.assertIn("⚠️ 有机化学：有机化学作业 | 截止：2026-05-17 23:59 | 平台：固定作业", body)
+        self.assertNotIn("下周固定作业", body)
         self.assertNotIn("已完成作业", body)
 
     def test_parse_recipients_accepts_commas_and_semicolons(self):

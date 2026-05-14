@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from datetime import timedelta
 
 from .config import DEFAULT_DB_PATH, DEFAULT_ICS_PATH, DEFAULT_LAUNCHD_LABEL, db_path, ensure_app_dirs
 from .calendar_sync import DEFAULT_CALENDAR_NAME, list_calendars, sync_calendar
@@ -314,15 +315,16 @@ def cmd_summary(args) -> int:
 def cmd_email_report(args) -> int:
     db = open_db(args)
     try:
+        now = now_local()
         if not args.no_sync_recurring:
-            materialize_recurring_assignments(db)
+            materialize_recurring_assignments(db, now=now, horizon_days=days_until_end_of_week(now))
         assignments = db.list_assignments(include_done=False)
         if args.dry_run:
-            print(f"Subject: {build_email_subject(assignments)}")
+            print(f"Subject: {build_email_subject(assignments, now=now)}")
             print()
-            print(build_email_report(assignments), end="")
+            print(build_email_report(assignments, now=now), end="")
             return 0
-        subject = send_email_report(assignments, config=email_config_from_env())
+        subject = send_email_report(assignments, config=email_config_from_env(), now=now)
         print(f"已发送作业日报：{subject}")
         return 0
     finally:
@@ -439,6 +441,12 @@ def cmd_install_launchd(args) -> int:
 
 def password_from_env(env_name: str) -> str:
     return os.environ.get(env_name, "")
+
+
+def days_until_end_of_week(now) -> int:
+    days_until_sunday = 6 - now.weekday()
+    end_of_sunday = now.replace(hour=23, minute=59, second=59, microsecond=0) + timedelta(days=days_until_sunday)
+    return max(0, (end_of_sunday - now).days + 1)
 
 
 def read_import_text(args) -> str:
