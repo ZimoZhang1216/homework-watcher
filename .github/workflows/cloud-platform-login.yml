@@ -34,6 +34,7 @@ jobs:
       HW_DB_PATH: ${{ github.workspace }}/.homework-watcher/homework.db
       HW_BROWSER_PROFILE_ROOT: ${{ github.workspace }}/.homework-watcher/browser-profiles
       DISPLAY: ":99"
+      NOVNC_PASSWORD: ${{ secrets.NOVNC_PASSWORD }}
 
     steps:
       - name: Check out repository
@@ -64,51 +65,117 @@ jobs:
         run: |
           python -m playwright install --with-deps chromium
           sudo apt-get update
-          sudo apt-get install -y xvfb fluxbox x11vnc novnc websockify
+          sudo apt-get install -y xvfb fluxbox x11vnc novnc websockify curl ca-certificates
+          curl --fail --location --retry 3 \
+            --output /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
 
       - name: Start remote desktop
         run: |
           set -euo pipefail
+          if [ -n "${NOVNC_PASSWORD:-}" ]; then
+            if [ "${#NOVNC_PASSWORD}" -gt 8 ]; then
+              echo "NOVNC_PASSWORD must be 8 characters or fewer because VNC passwords are limited to 8 characters." >&2
+              exit 1
+            fi
+            printf '%s' "$NOVNC_PASSWORD" > /tmp/novnc-password
+            printf 'secret' > /tmp/novnc-password-source
+          else
+            python - <<'PY' > /tmp/novnc-password
+          import secrets
+          import string
+
+          alphabet = string.ascii_letters + string.digits
+          print("".join(secrets.choice(alphabet) for _ in range(8)))
+          PY
+            printf 'generated' > /tmp/novnc-password-source
+          fi
+          x11vnc -storepasswd "$(cat /tmp/novnc-password)" /tmp/x11vnc.pass > /dev/null 2>&1
           Xvfb "$DISPLAY" -screen 0 1440x1000x24 > /tmp/xvfb.log 2>&1 &
           sleep 2
           fluxbox > /tmp/fluxbox.log 2>&1 &
-          x11vnc -display "$DISPLAY" -localhost -nopw -forever -shared -bg -o /tmp/x11vnc.log
+          x11vnc -display "$DISPLAY" -localhost -rfbauth /tmp/x11vnc.pass -forever -shared -bg -o /tmp/x11vnc.log
           websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900 > /tmp/novnc.log 2>&1 &
 
-      - name: Prepare cloud login command
+      - name: Open browser and print noVNC URL
         env:
           PLATFORM: ${{ inputs.platform }}
           HOLD_MINUTES: ${{ inputs.hold_minutes }}
         run: |
           set -euo pipefail
-          cat > /tmp/start-homework-login.sh <<EOF
-          #!/usr/bin/env bash
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          export DISPLAY="$DISPLAY"
-          export HW_DB_PATH="$HW_DB_PATH"
-          export HW_BROWSER_PROFILE_ROOT="$HW_BROWSER_PROFILE_ROOT"
-          python -m homework_watcher cloud-login "$PLATFORM" --hold-minutes "$HOLD_MINUTES"
-          EOF
-          chmod +x /tmp/start-homework-login.sh
+          python -m homework_watcher cloud-login "$PLATFORM" --hold-minutes "$HOLD_MINUTES" > /tmp/cloud-login.log 2>&1 &
+          login_pid=$!
+          sleep 3
+          if ! kill -0 "$login_pid" 2>/dev/null; then
+            cat /tmp/cloud-login.log
+            exit 1
+          fi
 
-      - name: Remote login instructions
-        run: |
-          cat <<'EOF'
-          1. In the next tmate step, copy the SSH command printed in the log.
-          2. On your Mac, add port forwarding to it:
-             ssh -L 6080:localhost:6080 <the-rest-of-the-tmate-command>
-          3. In the SSH session, run:
-             /tmp/start-homework-login.sh
-          4. Open this local URL:
-             http://localhost:6080/vnc.html?autoconnect=1&resize=scale
-          5. Log in to the opened platform pages manually.
-          6. Wait until /tmp/start-homework-login.sh finishes, then close the SSH session.
-          7. This workflow will then save the cloud browser login state cache.
-          EOF
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > /tmp/cloudflared.log 2>&1 &
+          tunnel_pid=$!
+          tunnel_url=""
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+              echo "cloudflared tunnel exited before a URL was available." >&2
+              cat /tmp/cloudflared.log >&2
+              kill "$login_pid" 2>/dev/null || true
+              wait "$login_pid" 2>/dev/null || true
+              exit 1
+            fi
+            tunnel_url="$(grep -Eo 'https://[-a-zA-Z0-9.]+\.trycloudflare.com' /tmp/cloudflared.log | head -n 1 || true)"
+            if [ -n "$tunnel_url" ]; then
+              break
+            fi
+            sleep 2
+          done
 
-      - name: Open tmate session
-        uses: mxschmitt/action-tmate@v3
+          if [ -z "$tunnel_url" ]; then
+            echo "Timed out waiting for a Cloudflare Tunnel URL." >&2
+            cat /tmp/cloudflared.log >&2
+            kill "$login_pid" "$tunnel_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          fi
+
+          login_url="${tunnel_url}/vnc.html?autoconnect=1&resize=scale"
+          password_source="$(cat /tmp/novnc-password-source)"
+          echo "::notice title=noVNC login URL::${login_url}"
+          {
+            echo "## Cloud platform login"
+            echo
+            echo "Open this noVNC URL: [${login_url}](${login_url})"
+            echo
+            if [ "$password_source" = "generated" ]; then
+              echo "noVNC password: \`$(cat /tmp/novnc-password)\`"
+            else
+              echo "noVNC password: use the value of repository secret \`NOVNC_PASSWORD\`."
+            fi
+            echo
+            echo "- Log in manually in the remote browser. Do not save platform passwords in the browser."
+            echo "- The browser stays open for ${HOLD_MINUTES} minutes."
+            echo "- Leave this workflow running until it reaches \`Save cloud state cache\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "远程浏览器链接：${login_url}"
+          if [ "$password_source" = "generated" ]; then
+            echo "本次 noVNC 密码：$(cat /tmp/novnc-password)"
+          else
+            echo "noVNC 密码使用仓库 Secret：NOVNC_PASSWORD"
+          fi
+          echo "请在远程浏览器里手动登录平台。程序不会读取、保存或提交你的密码，也不会绕过验证码。"
+          echo "浏览器会保持打开 ${HOLD_MINUTES} 分钟；计时结束后 workflow 会保存云端登录态。"
+          echo
+
+          tail -n +1 -f /tmp/cloud-login.log &
+          tail_pid=$!
+          set +e
+          wait "$login_pid"
+          login_status=$?
+          set -e
+          kill "$tail_pid" "$tunnel_pid" 2>/dev/null || true
+          wait "$tail_pid" "$tunnel_pid" 2>/dev/null || true
+          exit "$login_status"
 
       - name: Save cloud state cache
         if: always()

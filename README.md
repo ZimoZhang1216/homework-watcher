@@ -320,27 +320,24 @@ GitHub 托管 runner 没有你的本地登录态。如果要在云端扫描，�
 
 在 GitHub 页面进入 `Actions`，选择 `Cloud platform login`，点击 `Run workflow`。第一次建议选择 `all`，并把 `hold_minutes` 设为 `30` 或更长。
 
-运行到 `Open tmate session` 时，日志里会出现一条 SSH 命令。复制它，并在你的 Mac 终端里加上端口转发，例如：
-
-```bash
-ssh -L 6080:localhost:6080 <日志里 tmate 给出的其余 SSH 参数>
-```
-
-连接成功后，在 SSH 会话里运行：
-
-```bash
-/tmp/start-homework-login.sh
-```
-
-然后在本机浏览器打开：
+运行到 `Open browser and print noVNC URL` 时，打开 workflow 右上角的运行摘要，里面会显示一个临时 noVNC 链接和 noVNC 密码。也可以在该步骤日志里找到：
 
 ```text
-http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+远程浏览器链接：https://....trycloudflare.com/vnc.html?autoconnect=1&resize=scale
+本次 noVNC 密码：...
 ```
 
-你会看到 GitHub runner 上的远程浏览器。手动登录小雅和长江雨课堂；程序不会读取、保存或提交你的密码，也不会绕过验证码。等 `/tmp/start-homework-login.sh` 结束后，退出 SSH 会话，workflow 会把云端浏览器登录态保存到 GitHub Actions cache。
+打开这个链接，输入 noVNC 密码，就会看到 GitHub runner 上的远程浏览器。手动登录小雅和长江雨课堂；程序不会读取、保存或提交你的密码，也不会绕过验证码。
 
-注意：云端浏览器登录态包含 cookies/session，安全级别接近“已登录会话”。它保存在 GitHub Actions cache 中，不是明文密码，但仍应视为敏感数据。登录态也可能因为验证码、异地 IP 或平台风控而失效，失效后需要重新运行这个 workflow。
+如果希望 noVNC 密码不出现在日志里，可以在仓库 `Settings` -> `Secrets and variables` -> `Actions` 里增加：
+
+```text
+NOVNC_PASSWORD
+```
+
+配置后 workflow 不会打印密码，你打开 noVNC 时输入这个 secret 的值即可。VNC 密码最多 8 个字符，所以 `NOVNC_PASSWORD` 也必须不超过 8 个字符。登录完成后不要取消 workflow，等 `hold_minutes` 计时结束，workflow 会自动关闭远程浏览器并把云端浏览器登录态保存到 GitHub Actions cache。
+
+注意：临时 noVNC 链接由 Cloudflare Quick Tunnel 提供，只在 workflow 运行期间有效。云端浏览器登录态包含 cookies/session，安全级别接近“已登录会话”。它保存在 GitHub Actions cache 中，不是明文密码，但仍应视为敏感数据。登录态也可能因为验证码、异地 IP 或平台风控而失效，失效后需要重新运行这个 workflow。
 
 ## GitHub Actions 同步 iCloud Calendar
 
