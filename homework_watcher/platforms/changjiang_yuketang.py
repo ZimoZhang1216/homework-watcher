@@ -37,6 +37,11 @@ class ChangjiangYuketangAdapter(PlaywrightPlatformAdapter):
         *DEFAULT_CANDIDATE_SELECTORS,
     ]
 
+    def _launch_context(self, playwright, *, headless: bool):
+        context = super()._launch_context(playwright, headless=headless)
+        prefer_student_entry(context)
+        return context
+
     def fetch_assignments(
         self,
         *,
@@ -51,6 +56,8 @@ class ChangjiangYuketangAdapter(PlaywrightPlatformAdapter):
                 emit_progress(progress, f"{self.platform_name}：打开课程列表")
                 page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 self.wait_until_ready(page)
+                ensure_student_tab(page)
+                self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
                 if self.is_login_required(page):
                     raise LoginRequiredError(
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
@@ -72,6 +79,8 @@ class ChangjiangYuketangAdapter(PlaywrightPlatformAdapter):
                     )
                     page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                     self.wait_until_ready(page)
+                    ensure_student_tab(page)
+                    self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
                     cards = page.locator(".studentCol")
                     if index >= cards.count():
                         continue
@@ -100,6 +109,45 @@ class ChangjiangYuketangAdapter(PlaywrightPlatformAdapter):
 def fetch_assignments(*, headless: bool = True, progress: ProgressCallback = None):
     """Fetch assignments from Changjiang Yuketang without submitting anything."""
     return ChangjiangYuketangAdapter().fetch_assignments(headless=headless, progress=progress)
+
+
+def prefer_student_entry(context) -> None:
+    context.add_init_script(
+        """
+        (() => {
+          try {
+            if (!location.hostname.endsWith("yuketang.cn")) return;
+            const raw = localStorage.getItem("vuex");
+            const state = raw ? JSON.parse(raw) : {};
+            state.isTeacherEntry = 2;
+            localStorage.setItem("vuex", JSON.stringify(state));
+          } catch (_) {
+            try {
+              localStorage.setItem("vuex", JSON.stringify({ isTeacherEntry: 2 }));
+            } catch (_) {}
+          }
+        })();
+        """
+    )
+
+
+def ensure_student_tab(page) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              const raw = localStorage.getItem("vuex");
+              const state = raw ? JSON.parse(raw) : {};
+              state.isTeacherEntry = 2;
+              localStorage.setItem("vuex", JSON.stringify(state));
+              const tab = document.querySelector("#tab-student, [aria-controls='pane-student']");
+              if (tab && tab.getAttribute("aria-selected") !== "true") tab.click();
+            }
+            """
+        )
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
 
 
 def collect_course_cards(page) -> list[str]:
