@@ -14,7 +14,7 @@ jobs:
   email-report:
     name: Send homework report email
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     env:
       TZ: Asia/Shanghai
       HW_DB_PATH: ${{ github.workspace }}/.homework-watcher/homework.db
@@ -65,8 +65,13 @@ jobs:
       - name: Scan platforms
         run: |
           set -euo pipefail
-          python -m homework_watcher scan --no-notify || {
-            echo "::warning::Platform scan failed. Sending email report from cached database and fixed weekly assignments."
+          timeout 18m python -m homework_watcher scan --no-notify || {
+            status=$?
+            if [ "$status" -eq 124 ]; then
+              echo "::warning::Platform scan timed out after 18 minutes. Sending email report from cached database and fixed weekly assignments."
+            else
+              echo "::warning::Platform scan failed with exit code $status. Sending email report from cached database and fixed weekly assignments."
+            fi
           }
 
       - name: Preview email report
