@@ -1,6 +1,6 @@
 # homework-watcher
 
-macOS 本地作业提醒系统。它只负责发现、记录、提醒和导出日历，不自动提交作业，不绕过验证码，也不保存明文密码。
+macOS 本地作业提醒系统。它只负责发现、记录、提醒和发送邮件日报，不自动提交作业，不绕过验证码，也不保存明文密码。
 
 ## 功能
 
@@ -10,9 +10,8 @@ macOS 本地作业提醒系统。它只负责发现、记录、提醒和导出�
 - 提供 `homework_watcher/platforms/changjiang_yuketang.py` 和 `homework_watcher/platforms/xiaoya.py` 两个平台适配器。
 - 支持 Playwright 读取“长江雨课堂”和“小雅”页面上的作业信息。
 - 支持 macOS 通知提醒。
-- 支持导出 `.ics` 文件并导入 Apple 日历。
 - 支持输出“今日截止、明日截止、逾期未提交”汇总。
-- 支持通过 launchd 本地定时运行；邮件日报可由 cron-job.org 触发 GitHub workflow。
+- 支持由 cron-job.org 触发 GitHub workflow 发送邮件日报。
 
 ## 安装
 
@@ -163,44 +162,6 @@ hw sync-recurring
 
 当前内置两条固定规则：`定量化学分析作业` 每周二 23:59 截止，平台显示为 `飞书私信助教`；`有机化学作业` 每周日 23:59 截止，平台显示为 `线下`。`hw check` 会自动补齐未来 28 天内的固定作业，重复运行不会重复添加。
 
-导出 Apple 日历文件：
-
-```bash
-hw export-ics
-open ~/.homework-watcher/homework-watcher.ics
-```
-
-直接同步到 macOS Calendar：
-
-```bash
-hw sync-calendar
-```
-
-默认会写入名为 `作业提醒-iCloud` 的日历，只同步当前可完成待办作业。请先在 Calendar app 左侧 `iCloud` 分组下创建同名日历；如果同名日历不存在，程序会报错，不会自动创建本地 `On My Mac` 日历。
-
-通过 CalDAV 直接同步到 iCloud Calendar：
-
-```bash
-export ICLOUD_USERNAME="你的 Apple Account 邮箱"
-read -rsp "iCloud app-specific password: " ICLOUD_APP_PASSWORD; echo
-export ICLOUD_APP_PASSWORD
-hw sync-icloud-calendar
-```
-
-这里必须使用 Apple app-specific password，不要使用 Apple Account 主密码。默认 CalDAV 地址是 `https://caldav.icloud.com`，默认日历名仍是 `作业提醒-iCloud`。如果要指定日历名：
-
-```bash
-hw sync-icloud-calendar --calendar-name "作业提醒-iCloud"
-```
-
-直接同步到 macOS Reminders：
-
-```bash
-hw sync-reminders
-```
-
-默认会写入 Reminders 里的 `Reminders` 列表，只同步当前可完成待办作业。提醒事项名称格式为 `课程名称：作业名`，例如 `结构化学：作业-07`；从同步时间起三天内截止的作业会加警示前缀，例如 `⚠️ 结构化学：作业-07`。列表不存在时会自动创建；同步前会删除该列表里带有 `homework-watcher-id:` 标记的旧提醒事项，不会删除你手动创建的其他提醒事项。
-
 ## 提醒规则
 
 - 新作业第一次出现时提醒。
@@ -212,103 +173,6 @@ hw sync-reminders
 `hw check` 每次只会对同一个作业触发当前最紧急且未发送过的一条临近截止提醒。
 
 长江雨课堂中状态为“未开始/未开放”的作业会被标记为 `不可完成的作业`。这类任务不会出现在默认 `hw list`、提醒检查和每日汇总中；需要查看完整记录时使用 `hw list --all`。
-
-## 手动运行
-
-如果不想在本机定时自动运行，可以用仓库里的脚本手动触发一次完整检查：
-
-```bash
-./scripts/run-now.sh
-```
-
-这个脚本会执行平台扫描、本地提醒检查、同步 `作业提醒-iCloud` 日历，并同步 Reminders 里的 `Reminders` 列表。它等价于：
-
-```bash
-.venv/bin/python -m homework_watcher check --scan --calendar-sync --calendar-name "作业提醒-iCloud" --reminders-sync --reminders-list "Reminders"
-```
-
-## launchd 定时运行
-
-当前本机自动运行已停用。如需重新启用，再运行下面的 `hw install-launchd ...` 命令。
-
-安装每 60 分钟运行一次的 LaunchAgent：
-
-```bash
-hw install-launchd
-```
-
-只写入 plist，不立即加载：
-
-```bash
-hw install-launchd --no-load
-```
-
-调整频率：
-
-```bash
-hw install-launchd --interval-minutes 30
-```
-
-让定时任务每次先扫描平台，再做本地提醒检查：
-
-```bash
-hw install-launchd --scan
-```
-
-每天早上 08:00 自动扫描、提醒，并同步到 Calendar 和 Reminders：
-
-```bash
-hw install-launchd --daily-at 08:00 --scan --calendar-sync --reminders-sync
-```
-
-如果你想使用别的日历名或提醒事项列表名：
-
-```bash
-hw install-launchd --daily-at 08:00 --scan --calendar-sync --calendar-name "作业提醒-iCloud" --reminders-sync --reminders-list "Reminders"
-```
-
-生成的文件默认位于：
-
-```text
-~/Library/LaunchAgents/com.local.homework-watcher.plist
-```
-
-日志位于：
-
-```text
-~/.homework-watcher/logs/
-```
-
-仓库中也提供了模板：
-
-```text
-launchd/com.local.homework-watcher.plist.template
-```
-
-## GitHub Actions 手动扫描
-
-仓库包含手动触发的 workflow：
-
-```text
-.github/workflows/scan-homework.yml
-```
-
-在 GitHub 页面进入 `Actions`，选择 `Scan homework`，点击 `Run workflow` 就会触发扫描。可以选择扫描全部平台、只扫描长江雨课堂，或只扫描小雅。
-
-这个 workflow 默认运行在 `self-hosted` + `macOS` runner 上。原因是平台扫描依赖本机浏览器登录态，登录态默认保存在：
-
-```text
-~/.homework-watcher/browser-profiles/
-```
-
-请先在同一个 macOS 用户下完成一次手动登录：
-
-```bash
-hw login changjiang-yuketang
-hw login xiaoya
-```
-
-GitHub 托管 runner 没有你的本地登录态。如果要在云端扫描，需要先用下面的 `Cloud platform login` workflow 建立云端浏览器登录态。
 
 ## GitHub Actions 云端登录态
 
@@ -338,25 +202,6 @@ NOVNC_PASSWORD
 配置后 workflow 不会打印密码，你打开 noVNC 时输入这个 secret 的值即可。VNC 密码最多 8 个字符，所以 `NOVNC_PASSWORD` 也必须不超过 8 个字符。登录完成后不要取消 workflow，等 `hold_minutes` 计时结束，workflow 会自动关闭远程浏览器并把云端浏览器登录态保存到 GitHub Actions cache。
 
 注意：临时 noVNC 链接由 Cloudflare Quick Tunnel 提供，只在 workflow 运行期间有效。云端浏览器登录态包含 cookies/session，安全级别接近“已登录会话”。它保存在 GitHub Actions cache 中，不是明文密码，但仍应视为敏感数据。登录态也可能因为验证码、异地 IP 或平台风控而失效，失效后需要重新运行这个 workflow。
-
-## GitHub Actions 同步 iCloud Calendar
-
-仓库还包含云端 iCloud Calendar 同步 workflow：
-
-```text
-.github/workflows/icloud-calendar-sync.yml
-```
-
-它运行在 GitHub 托管的 Ubuntu runner 上，每天 08:00 中国时间触发，通过 CalDAV 把当前数据库里的可完成作业写入 iCloud Calendar。它不依赖你的 Mac 开机，也不会写入 Apple Reminders。
-
-需要在 GitHub 仓库中配置 `Settings` -> `Secrets and variables` -> `Actions`：
-
-- Secret `ICLOUD_USERNAME`：你的 Apple Account 邮箱。
-- Secret `ICLOUD_APP_PASSWORD`：Apple app-specific password。
-- Variable `ICLOUD_CALENDAR_NAME`：可选，默认 `作业提醒-iCloud`。
-- Variable `ICLOUD_CALDAV_URL`：可选，默认 `https://caldav.icloud.com`。
-
-这个 workflow 会用 GitHub cache 保存 `.homework-watcher/homework.db`，所以作业标题、课程和截止时间会保存在 GitHub Actions cache 中；不会保存平台密码。平台扫描仍然需要有效浏览器登录态，GitHub 托管 runner 默认没有你的本地登录态，因此 workflow 的自动日历同步与平台自动扫描是两个不同问题。手动触发 workflow 时可以勾选 `run_scan` 做调试，但如果没有登录态，平台扫描会失败并提示重新登录。
 
 ## GitHub Actions 邮件日报
 

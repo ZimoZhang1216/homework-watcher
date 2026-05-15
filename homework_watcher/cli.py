@@ -2,25 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from datetime import timedelta
 from pathlib import Path
 
-from .config import DEFAULT_DB_PATH, DEFAULT_ICS_PATH, DEFAULT_LAUNCHD_LABEL, db_path, ensure_app_dirs
-from .calendar_sync import DEFAULT_CALENDAR_NAME, list_calendars, sync_calendar
+from .config import DEFAULT_DB_PATH, db_path, ensure_app_dirs
 from .datetime_utils import human_datetime, now_local, parse_datetime
 from .db import HomeworkDB
 from .email_report import build_email_report, build_email_subject, email_config_from_env, send_email_report
-from .ics import export_ics
-from .icloud_calendar_sync import DEFAULT_ICLOUD_CALDAV_URL, sync_icloud_calendar
-from .launchd import install_launchd
 from .notifier import Notifier
 from .parser import parse_assignments
 from .recurring_assignments import DEFAULT_RECURRING_HORIZON_DAYS, materialize_recurring_assignments
 from .reminders import remind_new_assignment, run_due_reminders
-from .reminders_sync import DEFAULT_REMINDERS_LIST_NAME, list_reminder_lists, sync_reminders
 from .summary import build_daily_summary
 
 
@@ -86,16 +80,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     check_parser = subparsers.add_parser("check", help="检查临近截止和逾期作业，并输出每日汇总")
     check_parser.add_argument("--scan", action="store_true", help="提醒前先用 Playwright 扫描平台作业")
     check_parser.add_argument("--headed-scan", action="store_true", help="扫描时显示浏览器窗口")
-    check_parser.add_argument("--calendar-sync", action="store_true", help="把当前可完成待办同步到 macOS Calendar")
-    check_parser.add_argument("--calendar-name", default=DEFAULT_CALENDAR_NAME, help="Calendar 日历名称")
-    check_parser.add_argument("--icloud-calendar-sync", action="store_true", help="通过 CalDAV 把当前可完成待办同步到 iCloud Calendar")
-    check_parser.add_argument("--icloud-calendar-name", default=os.environ.get("ICLOUD_CALENDAR_NAME", DEFAULT_CALENDAR_NAME), help="iCloud Calendar 日历名称")
-    check_parser.add_argument("--icloud-caldav-url", default=os.environ.get("ICLOUD_CALDAV_URL", DEFAULT_ICLOUD_CALDAV_URL), help="iCloud CalDAV URL")
-    check_parser.add_argument("--icloud-username", default=os.environ.get("ICLOUD_USERNAME", ""), help="iCloud/Apple Account 用户名；也可设置 ICLOUD_USERNAME")
-    check_parser.add_argument("--icloud-password-env", default="ICLOUD_APP_PASSWORD", help="保存 iCloud app-specific password 的环境变量名")
-    check_parser.add_argument("--icloud-create-calendar", action="store_true", help="iCloud 日历不存在时自动创建")
-    check_parser.add_argument("--reminders-sync", action="store_true", help="把当前可完成待办同步到 macOS Reminders")
-    check_parser.add_argument("--reminders-list", default=DEFAULT_REMINDERS_LIST_NAME, help="Reminders 列表名称")
     check_parser.add_argument("--no-notify", action="store_true")
     check_parser.set_defaults(handler=cmd_check)
 
@@ -110,48 +94,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     recurring_parser = subparsers.add_parser("sync-recurring", help="补齐固定每周作业")
     recurring_parser.add_argument("--horizon-days", type=int, default=DEFAULT_RECURRING_HORIZON_DAYS)
     recurring_parser.set_defaults(handler=cmd_sync_recurring)
-
-    calendars_parser = subparsers.add_parser("calendars", help="列出 macOS Calendar 中的日历")
-    calendars_parser.set_defaults(handler=cmd_calendars)
-
-    reminder_lists_parser = subparsers.add_parser("reminder-lists", help="列出 macOS Reminders 中的列表")
-    reminder_lists_parser.set_defaults(handler=cmd_reminder_lists)
-
-    ics_parser = subparsers.add_parser("export-ics", help="导出 Apple 日历可导入的 .ics 文件")
-    ics_parser.add_argument("--output", type=Path, default=DEFAULT_ICS_PATH)
-    ics_parser.add_argument("--all", action="store_true", help="包含已完成作业")
-    ics_parser.set_defaults(handler=cmd_export_ics)
-
-    calendar_parser = subparsers.add_parser("sync-calendar", help="把当前可完成待办同步到 macOS Calendar")
-    calendar_parser.add_argument("--calendar-name", default=DEFAULT_CALENDAR_NAME, help="Calendar 日历名称")
-    calendar_parser.add_argument("--dry-run", action="store_true", help="只打印 AppleScript，不写入 Calendar")
-    calendar_parser.set_defaults(handler=cmd_sync_calendar)
-
-    icloud_calendar_parser = subparsers.add_parser("sync-icloud-calendar", help="通过 CalDAV 把当前可完成待办同步到 iCloud Calendar")
-    icloud_calendar_parser.add_argument("--calendar-name", default=os.environ.get("ICLOUD_CALENDAR_NAME", DEFAULT_CALENDAR_NAME), help="iCloud Calendar 日历名称")
-    icloud_calendar_parser.add_argument("--url", default=os.environ.get("ICLOUD_CALDAV_URL", DEFAULT_ICLOUD_CALDAV_URL), help="iCloud CalDAV URL")
-    icloud_calendar_parser.add_argument("--username", default=os.environ.get("ICLOUD_USERNAME", ""), help="iCloud/Apple Account 用户名；也可设置 ICLOUD_USERNAME")
-    icloud_calendar_parser.add_argument("--password-env", default="ICLOUD_APP_PASSWORD", help="保存 iCloud app-specific password 的环境变量名")
-    icloud_calendar_parser.add_argument("--create-calendar", action="store_true", help="日历不存在时自动创建")
-    icloud_calendar_parser.add_argument("--dry-run", action="store_true", help="只打印 CalDAV event ICS，不写入 iCloud")
-    icloud_calendar_parser.set_defaults(handler=cmd_sync_icloud_calendar)
-
-    reminders_parser = subparsers.add_parser("sync-reminders", help="把当前可完成待办同步到 macOS Reminders")
-    reminders_parser.add_argument("--reminders-list", default=DEFAULT_REMINDERS_LIST_NAME, help="Reminders 列表名称")
-    reminders_parser.add_argument("--dry-run", action="store_true", help="只打印 AppleScript，不写入 Reminders")
-    reminders_parser.set_defaults(handler=cmd_sync_reminders)
-
-    launchd_parser = subparsers.add_parser("install-launchd", help="安装 launchd 定时检查任务")
-    launchd_parser.add_argument("--label", default=DEFAULT_LAUNCHD_LABEL)
-    launchd_parser.add_argument("--interval-minutes", type=int, default=60)
-    launchd_parser.add_argument("--daily-at", help="每天固定时间运行，格式 HH:MM，例如 08:00")
-    launchd_parser.add_argument("--scan", action="store_true", help="定时任务运行 hw check --scan")
-    launchd_parser.add_argument("--calendar-sync", action="store_true", help="定时任务同步 macOS Calendar")
-    launchd_parser.add_argument("--calendar-name", default=DEFAULT_CALENDAR_NAME, help="Calendar 日历名称")
-    launchd_parser.add_argument("--reminders-sync", action="store_true", help="定时任务同步 macOS Reminders")
-    launchd_parser.add_argument("--reminders-list", default=DEFAULT_REMINDERS_LIST_NAME, help="Reminders 列表名称")
-    launchd_parser.add_argument("--no-load", action="store_true", help="只写 plist，不立即加载")
-    launchd_parser.set_defaults(handler=cmd_install_launchd)
 
     return parser
 
@@ -315,22 +257,6 @@ def cmd_check(args) -> int:
                 print(f"已提醒：#{event.assignment.id} {event.assignment.title} ({event.title})")
         else:
             print("没有新的提醒。")
-        if args.calendar_sync:
-            count = sync_calendar(db.list_assignments(include_done=False), calendar_name=args.calendar_name)
-            print(f"已同步 {count} 条可完成待办到 Calendar：{args.calendar_name}")
-        if args.icloud_calendar_sync:
-            result = sync_icloud_calendar(
-                db.list_assignments(include_done=False),
-                username=args.icloud_username,
-                app_password=password_from_env(args.icloud_password_env),
-                calendar_name=args.icloud_calendar_name,
-                url=args.icloud_caldav_url,
-                create_calendar=args.icloud_create_calendar,
-            )
-            print(f"已同步 {result.created} 条可完成待办到 iCloud Calendar：{result.calendar_name}，删除旧事件 {result.deleted} 条")
-        if args.reminders_sync:
-            count = sync_reminders(db.list_assignments(include_done=False), list_name=args.reminders_list)
-            print(f"已同步 {count} 条可完成待办到 Reminders：{args.reminders_list}")
         print()
         print(build_daily_summary(db.list_assignments(include_done=False)))
         return 0
@@ -377,105 +303,6 @@ def cmd_sync_recurring(args) -> int:
         return 0
     finally:
         db.close()
-
-
-def cmd_calendars(args) -> int:
-    rows = list_calendars()
-    if not rows:
-        print("没有读取到 Calendar 日历。")
-        return 0
-    print("序号  可写    事件数  名称")
-    for row in rows:
-        writable = "是" if row["writable"] == "true" else "否"
-        print(f"{row['index']:<4} {writable:<5} {row['events']:<5} {row['name']}")
-    return 0
-
-
-def cmd_reminder_lists(args) -> int:
-    rows = list_reminder_lists()
-    if not rows:
-        print("没有读取到 Reminders 列表。")
-        return 0
-    print("提醒数  名称")
-    for row in rows:
-        print(f"{row['reminders']:<5} {row['name']}")
-    return 0
-
-
-def cmd_export_ics(args) -> int:
-    db = open_db(args)
-    try:
-        assignments = db.list_assignments(include_done=args.all)
-        output = export_ics(assignments, args.output)
-        print(f"已导出 {len(assignments)} 条作业到 {output}")
-        return 0
-    finally:
-        db.close()
-
-
-def cmd_sync_calendar(args) -> int:
-    db = open_db(args)
-    try:
-        assignments = db.list_assignments(include_done=False)
-        count = sync_calendar(assignments, calendar_name=args.calendar_name, dry_run=args.dry_run)
-        action = "生成 Calendar 同步脚本" if args.dry_run else "同步到 Calendar"
-        print(f"已{action}：{count} 条可完成待办，日历 {args.calendar_name}")
-        return 0
-    finally:
-        db.close()
-
-
-def cmd_sync_icloud_calendar(args) -> int:
-    db = open_db(args)
-    try:
-        assignments = db.list_assignments(include_done=False)
-        result = sync_icloud_calendar(
-            assignments,
-            username=args.username,
-            app_password=password_from_env(args.password_env),
-            calendar_name=args.calendar_name,
-            url=args.url,
-            create_calendar=args.create_calendar,
-            dry_run=args.dry_run,
-        )
-        action = "生成 iCloud Calendar CalDAV 事件" if args.dry_run else "同步到 iCloud Calendar"
-        print(f"已{action}：{result.created} 条可完成待办，日历 {result.calendar_name}")
-        return 0
-    finally:
-        db.close()
-
-
-def cmd_sync_reminders(args) -> int:
-    db = open_db(args)
-    try:
-        assignments = db.list_assignments(include_done=False)
-        count = sync_reminders(assignments, list_name=args.reminders_list, dry_run=args.dry_run)
-        action = "生成 Reminders 同步脚本" if args.dry_run else "同步到 Reminders"
-        print(f"已{action}：{count} 条可完成待办，列表 {args.reminders_list}")
-        return 0
-    finally:
-        db.close()
-
-
-def cmd_install_launchd(args) -> int:
-    path = install_launchd(
-        label=args.label,
-        interval_minutes=args.interval_minutes,
-        scan=args.scan,
-        calendar_sync=args.calendar_sync,
-        calendar_name=args.calendar_name,
-        reminders_sync=args.reminders_sync,
-        reminders_list=args.reminders_list,
-        daily_at=args.daily_at,
-        load=not args.no_load,
-    )
-    action = "写入并加载" if not args.no_load else "写入"
-    print(f"已{action} launchd 配置：{path}")
-    return 0
-
-
-def password_from_env(env_name: str) -> str:
-    return os.environ.get(env_name, "")
 
 
 def days_until_end_of_week(now) -> int:

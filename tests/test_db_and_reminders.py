@@ -8,7 +8,6 @@ from pathlib import Path
 
 from homework_watcher.db import HomeworkDB
 from homework_watcher.cli import platform_status_is_done, platform_status_is_unavailable, status_for
-from homework_watcher.ics import export_ics
 from homework_watcher.notifier import Notifier
 from homework_watcher.recurring_assignments import materialize_recurring_assignments
 from homework_watcher.reminders import run_due_reminders
@@ -192,7 +191,7 @@ class DBAndReminderTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_summary_and_ics_export(self):
+    def test_summary_includes_due_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = HomeworkDB(Path(tmp) / "homework.db")
             try:
@@ -205,11 +204,6 @@ class DBAndReminderTests(unittest.TestCase):
                 self.assertIn("今日作业", summary)
                 self.assertIn("明日作业", summary)
                 self.assertIn("逾期作业", summary)
-
-                output = export_ics(db.list_assignments(), Path(tmp) / "homework.ics")
-                content = output.read_text(encoding="utf-8")
-                self.assertIn("BEGIN:VCALENDAR", content)
-                self.assertIn("作业截止", content)
             finally:
                 db.close()
 
