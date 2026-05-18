@@ -13,3 +13,4 @@ build/
 venv/
 *.egg-info/
 CONTINUE_NOTES.md
+deploy/.env

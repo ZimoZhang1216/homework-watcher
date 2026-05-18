@@ -296,6 +296,16 @@ POST https://your-domain.example/admin/run-daily?token=YOUR_HW_WEB_ADMIN_TOKEN
 
 Web 仪表盘会显示后台扫描进度和当前扫描到的课程；扫描中页面会自动刷新。固定每周作业会在待办表格中显示“完成”勾选项，勾选后从待办和逾期统计中移除。
 
+公开部署配置在 `deploy/` 目录：
+
+```bash
+cp deploy/.env.example deploy/.env
+# 填好域名、SMTP、HW_WEB_SECRET_KEY、HW_WEB_ADMIN_TOKEN 等配置
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
+```
+
+详细步骤见 `deploy/README.md`。公开给同学使用时必须使用 HTTPS，并确保 `HW_WEB_SECRET_KEY`、`HW_WEB_ADMIN_TOKEN`、`SMTP_PASSWORD` 不进入 Git。
+
 ## 测试
 
 ```bash

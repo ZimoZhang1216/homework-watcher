@@ -1,0 +1,22 @@
+{
+	email {env.CADDY_EMAIL}
+}
+
+{env.APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "same-origin"
+	}
+
+	handle_path /vnc/* {
+		reverse_proxy app:6080
+	}
+
+	handle {
+		reverse_proxy app:8080
+	}
+}
