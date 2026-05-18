@@ -257,6 +257,43 @@ User-Agent: homework-watcher-cron-job
 
 保存后可以在 cron-job.org 里手动执行一次。成功时 GitHub API 会返回 2xx，然后 GitHub 仓库的 `Actions` 页面会出现一次 `Email homework report` 运行记录。
 
+## 托管版网站 MVP
+
+仓库提供一个托管版 Web 入口，适合方案 B：每个同学注册自己的账号，在远程浏览器中手动登录小雅和长江雨课堂，服务端按用户隔离浏览器登录态、作业数据库和日报邮箱。
+
+启动：
+
+```bash
+export SMTP_HOST="smtp.example.com"
+export SMTP_USERNAME="sender@example.com"
+export SMTP_PASSWORD="smtp-password-or-app-password"
+export EMAIL_FROM="sender@example.com"
+export HW_WEB_SECRET_KEY="change-this-to-a-long-random-secret"
+export HW_WEB_ADMIN_TOKEN="change-this-admin-token"
+export HW_WEB_NOVNC_URL="https://your-domain.example/vnc.html?autoconnect=1&resize=scale"
+hw-web
+```
+
+Web 服务默认监听 `127.0.0.1:8080`。可以用环境变量调整：
+
+```bash
+HW_WEB_HOST=0.0.0.0 HW_WEB_PORT=8080 hw-web
+```
+
+远程登录依赖部署环境提供 Xvfb、x11vnc 和 noVNC。为了避免同学互相看到登录页面，当前 MVP 同一时间只允许一个远程登录会话。每个用户的浏览器资料和作业数据库保存在：
+
+```text
+~/.homework-watcher/web/users/<user-id>/
+```
+
+cron-job.org 可以每天触发托管网站的批量日报接口：
+
+```text
+POST https://your-domain.example/admin/run-daily?token=YOUR_HW_WEB_ADMIN_TOKEN
+```
+
+这个接口会为每个注册用户启动后台任务：扫描平台、补齐本周固定作业、发送日报。请只通过 HTTPS 暴露网站，并把 noVNC 放在同一层访问控制之后。
+
 ## 测试
 
 ```bash

@@ -9,11 +9,14 @@ description = "Local macOS homework deadline watcher for Changjiang Yuketang and
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.115",
     "playwright>=1.45",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]
 hw = "homework_watcher.cli:main"
+hw-web = "homework_watcher.web_app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
