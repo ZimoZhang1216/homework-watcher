@@ -23,7 +23,12 @@ from .datetime_utils import now_local
 from .db import HomeworkDB
 from .email_report import EmailConfig, build_email_report, build_email_subject, send_email_report, truthy
 from .platforms import ADAPTER_CLASSES, canonical_slugs
-from .platforms.base import LoginRequiredError, PageStructureChangedError, PlaywrightUnavailableError
+from .platforms.base import (
+    LoginRequiredError,
+    PageStructureChangedError,
+    PlaywrightUnavailableError,
+    format_playwright_error,
+)
 from .recurring_assignments import materialize_recurring_assignments
 
 
@@ -187,42 +192,61 @@ class LoginSessionManager:
     def __init__(self):
         self.lock = threading.Lock()
         self.active: dict | None = None
+        self.starting: dict | None = None
 
-    def start(self, *, user: WebUser, platform: str) -> None:
+    async def start(self, *, user: WebUser, platform: str) -> None:
+        adapter_class = adapter_class_for(platform)
+        adapter = adapter_class(profile_root=user_browser_profile_root(user.id))
         with self.lock:
-            if self.active is not None:
+            if self.active is not None or self.starting is not None:
                 raise RuntimeError("已有同学正在远程浏览器中登录。请稍后再试。")
-            adapter_class = adapter_class_for(platform)
-            adapter = adapter_class(profile_root=user_browser_profile_root(user.id))
-            sync_playwright, playwright_error = load_playwright_for_web()
-            playwright = sync_playwright().start()
-            try:
-                context = adapter._launch_context(playwright, headless=False)
-                page = context.pages[0] if context.pages else context.new_page()
-                page.goto(adapter.url, wait_until="domcontentloaded", timeout=adapter.timeout_ms)
-            except Exception:
-                if "context" in locals():
+            self.starting = {"user_id": user.id, "platform": adapter.platform_name}
+        async_playwright, playwright_error = load_async_playwright_for_web()
+        playwright = None
+        context = None
+        started = False
+        try:
+            playwright = await async_playwright().start()
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(adapter.user_data_dir),
+                headless=False,
+                locale="zh-CN",
+                viewport={"width": 1440, "height": 1000},
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(adapter.url, wait_until="domcontentloaded", timeout=adapter.timeout_ms)
+            with self.lock:
+                self.active = {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "platform": adapter.platform_name,
+                    "slug": adapter.slug,
+                    "started_at": timestamp_now(),
+                    "playwright": playwright,
+                    "context": context,
+                    "playwright_error": playwright_error,
+                }
+            started = True
+        except playwright_error as exc:
+            raise PlaywrightUnavailableError(format_playwright_error(exc)) from exc
+        except Exception:
+            raise
+        finally:
+            if not started:
+                if context is not None:
                     try:
-                        context.close()
+                        await context.close()
                     except Exception:
                         pass
-                try:
-                    playwright.stop()
-                finally:
-                    pass
-                raise
-            self.active = {
-                "user_id": user.id,
-                "email": user.email,
-                "platform": adapter.platform_name,
-                "slug": adapter.slug,
-                "started_at": timestamp_now(),
-                "playwright": playwright,
-                "context": context,
-                "playwright_error": playwright_error,
-            }
+                if playwright is not None:
+                    try:
+                        await playwright.stop()
+                    except Exception:
+                        pass
+            with self.lock:
+                self.starting = None
 
-    def finish(self, *, user_id: int) -> None:
+    async def finish(self, *, user_id: int) -> None:
         with self.lock:
             if self.active is None:
                 return
@@ -233,9 +257,9 @@ class LoginSessionManager:
         context = active["context"]
         playwright = active["playwright"]
         try:
-            context.close()
+            await context.close()
         finally:
-            playwright.stop()
+            await playwright.stop()
 
     def status_for(self, *, user_id: int) -> dict | None:
         with self.lock:
@@ -307,7 +331,7 @@ def create_app():
     @app.post("/platform-login/{platform}")
     async def platform_login(request: Request, platform: str):
         user = require_user(request, store)
-        login_manager.start(user=user, platform=platform)
+        await login_manager.start(user=user, platform=platform)
         return RedirectResponse("/remote-login", status_code=303)
 
     @app.get("/remote-login", response_class=HTMLResponse)
@@ -318,7 +342,7 @@ def create_app():
     @app.post("/remote-login/finish")
     async def finish_remote_login(request: Request):
         user = require_user(request, store)
-        login_manager.finish(user_id=user.id)
+        await login_manager.finish(user_id=user.id)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/jobs/scan")
@@ -698,6 +722,17 @@ def load_playwright_for_web():
     from .platforms.base import load_playwright
 
     return load_playwright()
+
+
+def load_async_playwright_for_web():
+    try:
+        from playwright.async_api import Error as PlaywrightError
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise PlaywrightUnavailableError(
+            "未安装 Playwright。请运行：python3 -m pip install -e . && python3 -m playwright install chromium"
+        ) from exc
+    return async_playwright, PlaywrightError
 
 
 def user_homework_db_path(user_id: int) -> Path:
