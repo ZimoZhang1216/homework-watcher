@@ -59,7 +59,7 @@ class WebStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.init_schema()
 
     def init_schema(self) -> None:
@@ -348,24 +348,32 @@ def create_app():
 
 def public_home() -> str:
     return """
-    <section class="grid">
-      <div>
-        <h1>homework-watcher</h1>
-        <p>集中托管作业日报服务。平台登录必须由用户在远程浏览器中手动完成；系统不保存平台密码，不自动提交作业，不绕过验证码。</p>
+    <section class="auth-shell">
+      <div class="brand-panel">
+        <div class="brand-mark">HW</div>
+        <p class="eyebrow">Homework Watcher</p>
+        <h1>作业日报托管台</h1>
+        <div class="boundary-list" aria-label="安全边界">
+          <span>不保存平台密码</span>
+          <span>手动完成验证码</span>
+          <span>只发送日报</span>
+        </div>
       </div>
-      <form method="post" action="/login" class="panel">
-        <h2>登录</h2>
-        <label>邮箱<input name="email" type="email" required></label>
-        <label>服务密码<input name="password" type="password" required></label>
-        <button type="submit">登录</button>
-      </form>
-      <form method="post" action="/register" class="panel">
-        <h2>注册</h2>
-        <label>邮箱<input name="email" type="email" required></label>
-        <label>日报收件邮箱<input name="report_email" type="email"></label>
-        <label>服务密码<input name="password" type="password" minlength="10" required></label>
-        <button type="submit">创建账号</button>
-      </form>
+      <div class="auth-forms">
+        <form method="post" action="/login" class="form-panel">
+          <h2>登录</h2>
+          <label>邮箱<input name="email" type="email" autocomplete="email" required></label>
+          <label>服务密码<input name="password" type="password" autocomplete="current-password" required></label>
+          <button type="submit">登录</button>
+        </form>
+        <form method="post" action="/register" class="form-panel muted-panel">
+          <h2>注册</h2>
+          <label>邮箱<input name="email" type="email" autocomplete="email" required></label>
+          <label>日报收件邮箱<input name="report_email" type="email" autocomplete="email"></label>
+          <label>服务密码<input name="password" type="password" minlength="10" autocomplete="new-password" required></label>
+          <button type="submit" class="secondary">创建账号</button>
+        </form>
+      </div>
     </section>
     """
 
@@ -378,53 +386,72 @@ def dashboard_page(user: WebUser, store: WebStore, login_manager: LoginSessionMa
         db.close()
     jobs = store.recent_jobs(user_id=user.id)
     active_login = login_manager.status_for(user_id=user.id)
+    now = now_local()
+    total = len(assignments)
+    overdue = sum(1 for item in assignments if item.due_at < now)
+    today = sum(1 for item in assignments if item.due_at.date() == now.date() and item.due_at >= now)
+    next_due = min(assignments, key=lambda item: item.due_at, default=None)
     body = [
-        f"<h1>{escape(user.email)}</h1>",
-        "<div class='toolbar'><form method='post' action='/logout'><button>退出</button></form></div>",
-        "<section class='panel'><h2>日报邮箱</h2>",
-        "<form method='post' action='/settings/report-email'>",
-        f"<label>收件邮箱<input name='report_email' type='email' value='{escape(user.report_email)}' required></label>",
-        "<button>保存</button></form></section>",
-        "<section class='panel'><h2>平台登录态</h2>",
-        "<p>点击后会打开服务端远程浏览器。请只在远程浏览器里手动登录平台，不要把密码交给本系统。</p>",
-        "<div class='actions'>",
-        "<form method='post' action='/platform-login/changjiang-yuketang'><button>登录长江雨课堂</button></form>",
-        "<form method='post' action='/platform-login/xiaoya'><button>登录小雅</button></form>",
-        "</div>",
+        "<header class='app-header'>",
+        "<div><p class='eyebrow'>Dashboard</p>",
+        f"<h1>{escape(user.email)}</h1></div>",
+        "<form method='post' action='/logout'><button class='ghost'>退出</button></form>",
+        "</header>",
+        "<section class='metric-grid'>",
+        f"<div class='metric'><span>待办</span><strong>{total}</strong></div>",
+        f"<div class='metric danger'><span>逾期</span><strong>{overdue}</strong></div>",
+        f"<div class='metric warn'><span>今日截止</span><strong>{today}</strong></div>",
+        f"<div class='metric'><span>最近截止</span><strong>{escape(next_due.due_at.strftime('%m-%d %H:%M') if next_due else '无')}</strong></div>",
+        "</section>",
+        "<section class='dashboard-grid'>",
+        "<div class='workspace-main'>",
+        "<section class='section-band'><div class='section-title'><h2>当前待办</h2><span class='count-pill'>"
+        f"{total}</span></div>",
     ]
-    if active_login:
-        body.append("<p><a href='/remote-login'>查看当前远程登录会话</a></p>")
+    if assignments:
+        body.append(render_assignment_table(assignments[:20]))
+    else:
+        body.append("<div class='empty-state'>暂无待办</div>")
     body.extend(
         [
             "</section>",
-            "<section class='panel'><h2>运行</h2><div class='actions'>",
-            "<form method='post' action='/jobs/scan'><button>立即扫描</button></form>",
-            "<form method='post' action='/jobs/send-report'><button>发送日报</button></form>",
-            "</div></section>",
-            "<section class='panel'><h2>当前待办</h2>",
+            "<section class='section-band'><div class='section-title'><h2>最近任务</h2></div>",
         ]
     )
-    if assignments:
-        body.append("<ol>")
-        for item in assignments[:20]:
-            body.append(
-                "<li>"
-                f"{escape(item.course or '未填写')} | {escape(item.title)} | "
-                f"{escape(item.platform or '未填写')} | {escape(item.due_at.strftime('%Y-%m-%d %H:%M'))}"
-                "</li>"
-            )
-        body.append("</ol>")
-    else:
-        body.append("<p>暂无待办。</p>")
-    body.append("</section><section class='panel'><h2>最近任务</h2>")
     if jobs:
-        body.append("<ol>")
+        body.append("<div class='job-list'>")
         for job in jobs:
-            body.append(f"<li>{escape(job.kind)} | {escape(job.status)} | {escape(job.message)}</li>")
-        body.append("</ol>")
+            body.append(render_job_row(job))
+        body.append("</div>")
     else:
-        body.append("<p>暂无任务。</p>")
-    body.append("</section>")
+        body.append("<div class='empty-state'>暂无任务</div>")
+    body.extend(
+        [
+            "</section></div>",
+            "<aside class='workspace-side'>",
+            "<section class='form-panel'><h2>日报邮箱</h2>",
+            "<form method='post' action='/settings/report-email'>",
+            f"<label>收件邮箱<input name='report_email' type='email' value='{escape(user.report_email)}' required></label>",
+            "<button>保存</button></form></section>",
+            "<section class='form-panel'><h2>平台登录态</h2>",
+            "<div class='actions vertical'>",
+            "<form method='post' action='/platform-login/changjiang-yuketang'><button type='submit'>长江雨课堂</button></form>",
+            "<form method='post' action='/platform-login/xiaoya'><button type='submit' class='secondary'>小雅</button></form>",
+            "</div>",
+        ]
+    )
+    if active_login:
+        body.append("<a class='inline-link' href='/remote-login'>查看当前远程登录会话</a>")
+    body.extend(
+        [
+            "</section>",
+            "<section class='form-panel accent-panel'><h2>运行</h2><div class='actions vertical'>",
+            "<form method='post' action='/jobs/scan'><button type='submit'>立即扫描</button></form>",
+            "<form method='post' action='/jobs/send-report'><button type='submit' class='secondary'>发送日报</button></form>",
+            "</div></section>",
+            "</aside></section>",
+        ]
+    )
     return page("Dashboard", "\n".join(body))
 
 
@@ -438,17 +465,23 @@ def remote_login_page(user: WebUser, login_manager: LoginSessionManager):
     link = (
         f"<p><a class='button' target='_blank' rel='noreferrer' href='{escape(novnc_url)}'>打开远程浏览器</a></p>"
         if novnc_url
-        else "<p class='warn'>未配置 HW_WEB_NOVNC_URL。请部署 noVNC 后把公开访问地址写入该环境变量。</p>"
+        else "<p class='callout warn'>未配置 HW_WEB_NOVNC_URL。请部署 noVNC 后把公开访问地址写入该环境变量。</p>"
     )
     return page(
         "远程登录",
         f"""
-        <section class="panel">
-          <h1>正在登录：{escape(active['platform'])}</h1>
-          <p>开始时间：{escape(active['started_at'])}</p>
+        <section class="remote-shell">
+          <div>
+            <p class="eyebrow">Remote Login</p>
+            <h1>正在登录：{escape(active['platform'])}</h1>
+            <p class="lede">在远程浏览器里手动登录平台。程序只保存浏览器登录态，不读取平台密码。</p>
+          </div>
+          <div class="form-panel">
+          <p><span class="field-label">开始时间</span>{escape(active['started_at'])}</p>
           {link}
-          <p>登录完成后点击下面按钮关闭远程浏览器并保存登录态。</p>
+          <p class="muted-text">登录完成后点击下面按钮关闭远程浏览器并保存登录态。</p>
           <form method="post" action="/remote-login/finish"><button>我已完成登录</button></form>
+          </div>
         </section>
         """,
     )
@@ -724,6 +757,73 @@ def days_until_end_of_week(now) -> int:
     return max(0, (end_of_sunday - now).days + 1)
 
 
+def render_assignment_table(assignments) -> str:
+    now = now_local()
+    rows = [
+        "<div class='table-wrap'><table>",
+        "<thead><tr><th>课程</th><th>作业</th><th>平台</th><th>截止</th><th>状态</th></tr></thead>",
+        "<tbody>",
+    ]
+    for item in assignments:
+        due_class = assignment_due_class(item, now)
+        rows.append(
+            "<tr>"
+            f"<td class='table-course'>{escape(item.course or '未填写')}</td>"
+            f"<td><strong>{escape(item.title)}</strong></td>"
+            f"<td>{escape(item.platform or '未填写')}</td>"
+            f"<td><span class='status-badge {due_class}'>{escape(item.due_at.strftime('%Y-%m-%d %H:%M'))}</span></td>"
+            f"<td>{escape(item.status or '未提交')}</td>"
+            "</tr>"
+        )
+    rows.append("</tbody></table></div>")
+    return "".join(rows)
+
+
+def assignment_due_class(item, now) -> str:
+    if item.due_at < now:
+        return "overdue"
+    if item.due_at.date() == now.date():
+        return "today"
+    if item.due_at <= now + timedelta(days=3):
+        return "soon"
+    return "normal"
+
+
+def render_job_row(job: WebJob) -> str:
+    return (
+        "<div class='job-row'>"
+        f"<span class='status-badge {job_status_class(job.status)}'>{escape(job_status_label(job.status))}</span>"
+        f"<strong>{escape(job_kind_label(job.kind))}</strong>"
+        f"<time>{escape(job.updated_at)}</time>"
+        f"<p>{escape(job.message or '处理中')}</p>"
+        "</div>"
+    )
+
+
+def job_kind_label(kind: str) -> str:
+    return {
+        "scan": "平台扫描",
+        "send-report": "发送日报",
+        "daily": "每日运行",
+    }.get(kind, kind)
+
+
+def job_status_label(status: str) -> str:
+    return {
+        "running": "运行中",
+        "success": "成功",
+        "failed": "失败",
+    }.get(status, status)
+
+
+def job_status_class(status: str) -> str:
+    return {
+        "running": "running",
+        "success": "success",
+        "failed": "failed",
+    }.get(status, "normal")
+
+
 def message_page(title: str, message: str) -> str:
     return f"<section class='panel'><h1>{escape(title)}</h1><p>{escape(message)}</p><p><a href='/'>返回</a></p></section>"
 
@@ -736,20 +836,211 @@ def page(title: str, body: str, *, status_code: int = 200):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f4; color: #171717; }}
-    main {{ width: min(1080px, calc(100vw - 32px)); margin: 32px auto; }}
-    h1, h2 {{ margin: 0 0 16px; }}
-    p {{ line-height: 1.55; }}
-    a {{ color: #0f5f8f; }}
-    .grid {{ display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 16px; align-items: start; }}
-    .panel {{ background: #fff; border: 1px solid #deded8; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
-    label {{ display: block; margin: 12px 0; font-weight: 600; }}
-    input {{ box-sizing: border-box; width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #c9c9c2; border-radius: 6px; font: inherit; }}
-    button, .button {{ display: inline-block; border: 0; border-radius: 6px; background: #1f6f52; color: #fff; padding: 10px 14px; font: inherit; text-decoration: none; cursor: pointer; }}
+    :root {{
+      --bg: #f4f5f1;
+      --surface: #ffffff;
+      --surface-soft: #fafaf7;
+      --ink: #20231f;
+      --muted: #686f67;
+      --line: #d9dbd3;
+      --primary: #245b45;
+      --primary-dark: #183f31;
+      --blue: #2e5d7e;
+      --amber: #9a5a00;
+      --red: #a03a2f;
+      --green-soft: #edf6f1;
+      --amber-soft: #fff5df;
+      --red-soft: #fff0ee;
+      --shadow: 0 18px 40px rgba(34, 39, 32, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    html {{ color-scheme: light; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        linear-gradient(180deg, rgba(36, 91, 69, 0.06), transparent 260px),
+        var(--bg);
+      color: var(--ink);
+    }}
+    body::before {{
+      content: "";
+      display: block;
+      height: 5px;
+      background: linear-gradient(90deg, var(--primary), var(--blue), var(--amber));
+    }}
+    main {{ width: min(1180px, calc(100vw - 32px)); margin: 30px auto 48px; }}
+    h1, h2, p {{ margin-top: 0; }}
+    h1 {{ margin-bottom: 12px; font-size: clamp(30px, 4vw, 56px); line-height: 1.05; letter-spacing: 0; }}
+    h2 {{ margin-bottom: 14px; font-size: 18px; line-height: 1.25; letter-spacing: 0; }}
+    p {{ line-height: 1.6; color: var(--muted); }}
+    a {{ color: var(--blue); }}
+    button, .button {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      border: 1px solid var(--primary);
+      border-radius: 7px;
+      background: var(--primary);
+      color: #fff;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+    }}
+    button:hover, .button:hover {{ background: var(--primary-dark); border-color: var(--primary-dark); transform: translateY(-1px); }}
+    button.secondary, .button.secondary {{ background: #fff; color: var(--primary); border-color: #b7c8bf; }}
+    button.secondary:hover, .button.secondary:hover {{ background: var(--green-soft); color: var(--primary-dark); }}
+    button.ghost {{ background: transparent; color: var(--ink); border-color: var(--line); }}
+    button.ghost:hover {{ background: #fff; border-color: #bcc0b7; }}
+    label {{ display: block; margin: 12px 0; color: var(--ink); font-weight: 700; }}
+    input {{
+      width: 100%;
+      margin-top: 7px;
+      padding: 11px 12px;
+      border: 1px solid #c9ccc3;
+      border-radius: 7px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }}
+    input:focus {{ outline: 3px solid rgba(36, 91, 69, 0.16); border-color: var(--primary); }}
+    .auth-shell {{ display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(340px, 0.88fr); gap: 24px; align-items: start; }}
+    .brand-panel {{ padding: 26px 8px 0 0; }}
+    .brand-mark {{
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--primary);
+      color: #fff;
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: 0;
+      box-shadow: var(--shadow);
+    }}
+    .brand-panel h1 {{ max-width: 680px; }}
+    .eyebrow {{
+      margin: 18px 0 10px;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+    .lede {{ max-width: 680px; font-size: 17px; }}
+    .boundary-list {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }}
+    .boundary-list span {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      border: 1px solid #cfd8cf;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--primary-dark);
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .auth-forms, .workspace-main, .workspace-side {{ display: grid; gap: 16px; }}
+    .form-panel, .panel, .section-band, .metric {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.75) inset;
+    }}
+    .muted-panel {{ background: var(--surface-soft); }}
+    .form-panel h2, .panel h1 {{ margin-bottom: 14px; }}
+    .app-header {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }}
+    .app-header h1 {{ margin: 0; font-size: clamp(24px, 3vw, 38px); overflow-wrap: anywhere; }}
+    .app-header .eyebrow {{ margin-top: 0; }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }}
+    .metric {{ min-height: 104px; }}
+    .metric span {{ display: block; color: var(--muted); font-size: 13px; font-weight: 700; }}
+    .metric strong {{ display: block; margin-top: 14px; font-size: 31px; line-height: 1; overflow-wrap: anywhere; }}
+    .metric.warn {{ border-color: #ead39b; background: var(--amber-soft); }}
+    .metric.danger {{ border-color: #e8bbb5; background: var(--red-soft); }}
+    .dashboard-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; align-items: start; }}
+    .section-title {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }}
+    .section-title h2 {{ margin: 0; }}
+    .count-pill {{
+      display: inline-flex;
+      min-width: 32px;
+      min-height: 26px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: var(--green-soft);
+      color: var(--primary);
+      padding: 4px 10px;
+      font-weight: 800;
+    }}
+    .empty-state {{
+      display: grid;
+      min-height: 120px;
+      place-items: center;
+      border: 1px dashed #c7cbc0;
+      border-radius: 8px;
+      background: var(--surface-soft);
+      color: var(--muted);
+      font-weight: 700;
+    }}
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; min-width: 720px; border-collapse: collapse; }}
+    th, td {{ padding: 13px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }}
+    th {{ color: var(--muted); font-size: 13px; font-weight: 800; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    td strong {{ display: block; line-height: 1.35; }}
+    .table-course {{ width: 20%; font-weight: 700; }}
+    .status-badge {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 26px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }}
+    .status-badge.success {{ border-color: #b7d8c8; background: var(--green-soft); color: #1f6a50; }}
+    .status-badge.failed, .status-badge.overdue {{ border-color: #e5b7b1; background: var(--red-soft); color: var(--red); }}
+    .status-badge.running, .status-badge.today, .status-badge.soon {{ border-color: #e5c989; background: var(--amber-soft); color: var(--amber); }}
+    .job-list {{ border-top: 1px solid var(--line); }}
+    .job-row {{ display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 13px 0; border-bottom: 1px solid var(--line); }}
+    .job-row:last-child {{ border-bottom: 0; padding-bottom: 0; }}
+    .job-row p {{ grid-column: 2 / -1; margin: 0; color: var(--muted); overflow-wrap: anywhere; }}
+    .job-row time {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
-    .toolbar {{ display: flex; justify-content: flex-end; }}
-    .warn {{ color: #8a4b00; }}
-    @media (max-width: 860px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+    .actions.vertical {{ display: grid; gap: 10px; }}
+    .actions.vertical form, .actions.vertical button {{ width: 100%; }}
+    .inline-link {{ display: inline-flex; margin-top: 12px; font-weight: 700; }}
+    .accent-panel {{ border-color: #c6d6ce; background: linear-gradient(180deg, #ffffff, var(--green-soft)); }}
+    .remote-shell {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 22px; align-items: start; }}
+    .remote-shell h1 {{ font-size: clamp(30px, 4vw, 48px); }}
+    .field-label {{ display: block; color: var(--muted); font-size: 13px; font-weight: 800; }}
+    .callout {{ border-radius: 8px; padding: 12px; background: var(--amber-soft); border: 1px solid #e5c989; }}
+    .warn {{ color: var(--amber); }}
+    .muted-text {{ color: var(--muted); }}
+    @media (max-width: 900px) {{
+      main {{ width: min(100vw - 24px, 720px); margin-top: 22px; }}
+      .auth-shell, .dashboard-grid, .metric-grid, .remote-shell {{ grid-template-columns: 1fr; }}
+      .brand-panel {{ padding-top: 4px; }}
+      .app-header {{ align-items: stretch; }}
+      .app-header form {{ flex: 0 0 auto; }}
+      .job-row {{ grid-template-columns: 1fr; }}
+      .job-row p {{ grid-column: 1; }}
+      .job-row time {{ white-space: normal; }}
+    }}
   </style>
 </head>
 <body><main>{body}</main></body>
