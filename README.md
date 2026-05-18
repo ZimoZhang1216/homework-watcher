@@ -294,6 +294,8 @@ POST https://your-domain.example/admin/run-daily?token=YOUR_HW_WEB_ADMIN_TOKEN
 
 这个接口会为每个注册用户启动后台任务：扫描平台、补齐本周固定作业、发送日报。请只通过 HTTPS 暴露网站，并把 noVNC 放在同一层访问控制之后。
 
+Web 仪表盘会显示后台扫描进度和当前扫描到的课程；扫描中页面会自动刷新。固定每周作业会在待办表格中显示“完成”勾选项，勾选后从待办和逾期统计中移除。
+
 ## 测试
 
 ```bash

@@ -9,6 +9,7 @@ from email.message import EmailMessage
 from .datetime_utils import human_datetime, now_local
 from .models import Assignment
 from .recurring_assignments import DEFAULT_RECURRING_RULES, RECURRING_PLATFORM
+from .statuses import assignment_is_pending
 
 
 DEFAULT_SMTP_PORT = 587
@@ -114,7 +115,7 @@ def build_email_report(assignments: list[Assignment], *, now: datetime | None = 
 
 
 def assignment_stats(assignments: list[Assignment], *, now: datetime) -> dict[str, int]:
-    pending = [item for item in assignments if not item.is_done]
+    pending = [item for item in assignments if assignment_is_pending(item)]
     today = now.date()
     tomorrow = today + timedelta(days=1)
     return {
@@ -160,7 +161,7 @@ def filter_report_assignments(assignments: list[Assignment], *, now: datetime) -
     return [
         item
         for item in assignments
-        if not item.is_done and (not is_recurring_assignment(item) or due_this_week(item, now=now))
+        if assignment_is_pending(item) and (not is_recurring_assignment(item) or due_this_week(item, now=now))
     ]
 
 

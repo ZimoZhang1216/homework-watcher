@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -21,7 +22,14 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from .config import APP_DIR
 from .datetime_utils import now_local
 from .db import HomeworkDB
-from .email_report import EmailConfig, build_email_report, build_email_subject, send_email_report, truthy
+from .email_report import (
+    EmailConfig,
+    build_email_report,
+    build_email_subject,
+    is_recurring_assignment,
+    send_email_report,
+    truthy,
+)
 from .platforms import ADAPTER_CLASSES, canonical_slugs
 from .platforms.base import (
     LoginRequiredError,
@@ -30,6 +38,7 @@ from .platforms.base import (
     format_playwright_error,
 )
 from .recurring_assignments import materialize_recurring_assignments
+from .statuses import assignment_is_done, platform_status_is_done
 
 
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
@@ -37,6 +46,7 @@ WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expandu
 SESSION_COOKIE = "homework_watcher_session"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
+JobProgress = Callable[[str, int | None], None]
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,7 @@ class WebJob:
     kind: str
     status: str
     message: str
+    progress: int
     created_at: str
     updated_at: str
 
@@ -85,13 +96,20 @@ class WebStore:
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
                     message TEXT NOT NULL DEFAULT '',
+                    progress INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 """
             )
+            self.ensure_columns()
             self.conn.commit()
+
+    def ensure_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "progress" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
 
     def create_user(self, *, email: str, password: str, report_email: str = "") -> WebUser:
         email = normalize_email(email)
@@ -156,8 +174,8 @@ class WebStore:
         with self.lock:
             cursor = self.conn.execute(
                 """
-                INSERT INTO jobs (user_id, kind, status, message, created_at, updated_at)
-                VALUES (?, ?, 'running', '', ?, ?)
+                INSERT INTO jobs (user_id, kind, status, message, progress, created_at, updated_at)
+                VALUES (?, ?, 'running', '等待开始', 0, ?, ?)
                 """,
                 (user_id, kind, timestamp, timestamp),
             )
@@ -165,11 +183,27 @@ class WebStore:
             return self.get_job(cursor.lastrowid)
 
     def finish_job(self, *, job_id: int, status: str, message: str) -> None:
+        progress = 100 if status == "success" else 0
         with self.lock:
             self.conn.execute(
-                "UPDATE jobs SET status = ?, message = ?, updated_at = ? WHERE id = ?",
-                (status, message, timestamp_now(), job_id),
+                "UPDATE jobs SET status = ?, message = ?, progress = ?, updated_at = ? WHERE id = ?",
+                (status, message, progress, timestamp_now(), job_id),
             )
+            self.conn.commit()
+
+    def update_job_progress(self, *, job_id: int, message: str, progress: int | None = None) -> None:
+        normalized = None if progress is None else max(0, min(100, int(progress)))
+        with self.lock:
+            if normalized is None:
+                self.conn.execute(
+                    "UPDATE jobs SET message = ?, updated_at = ? WHERE id = ?",
+                    (message, timestamp_now(), job_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE jobs SET message = ?, progress = ?, updated_at = ? WHERE id = ?",
+                    (message, normalized, timestamp_now(), job_id),
+                )
             self.conn.commit()
 
     def get_job(self, job_id: int) -> WebJob:
@@ -345,16 +379,26 @@ def create_app():
         await login_manager.finish(user_id=user.id)
         return RedirectResponse("/", status_code=303)
 
+    @app.post("/assignments/{assignment_id}/done")
+    async def mark_assignment_done(request: Request, assignment_id: int):
+        user = require_user(request, store)
+        db = HomeworkDB(user_homework_db_path(user.id))
+        try:
+            db.mark_done(assignment_id)
+        finally:
+            db.close()
+        return RedirectResponse("/", status_code=303)
+
     @app.post("/jobs/scan")
     async def scan(request: Request):
         user = require_user(request, store)
-        start_background_job(store, user=user, kind="scan", task=lambda: scan_user_homework(user))
+        start_background_job(store, user=user, kind="scan", task=lambda progress: scan_user_homework(user, progress=progress))
         return RedirectResponse("/", status_code=303)
 
     @app.post("/jobs/send-report")
     async def send_report(request: Request):
         user = require_user(request, store)
-        start_background_job(store, user=user, kind="send-report", task=lambda: send_user_report(user))
+        start_background_job(store, user=user, kind="send-report", task=lambda progress: send_user_report(user, progress=progress))
         return RedirectResponse("/", status_code=303)
 
     @app.post("/admin/run-daily")
@@ -363,7 +407,7 @@ def create_app():
             return PlainTextResponse("unauthorized", status_code=401)
         started = 0
         for user in store.list_users():
-            start_background_job(store, user=user, kind="daily", task=lambda user=user: daily_user_run(user))
+            start_background_job(store, user=user, kind="daily", task=lambda progress, user=user: daily_user_run(user, progress=progress))
             started += 1
         return PlainTextResponse(f"started {started} daily jobs\n")
 
@@ -476,6 +520,8 @@ def dashboard_page(user: WebUser, store: WebStore, login_manager: LoginSessionMa
             "</aside></section>",
         ]
     )
+    if any(job.status == "running" for job in jobs):
+        body.append("<script>setTimeout(() => location.reload(), 2500);</script>")
     return page("Dashboard", "\n".join(body))
 
 
@@ -511,21 +557,31 @@ def remote_login_page(user: WebUser, login_manager: LoginSessionManager):
     )
 
 
-def scan_user_homework(user: WebUser) -> str:
+def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) -> str:
     db = HomeworkDB(user_homework_db_path(user.id))
     created = 0
     seen = 0
     errors: list[str] = []
+    slugs = canonical_slugs()
+    emit_job_progress(progress, "准备扫描平台", 5)
     try:
-        for slug in canonical_slugs():
+        for index, slug in enumerate(slugs):
             adapter = ADAPTER_CLASSES[slug](profile_root=user_browser_profile_root(user.id))
+            platform_start = 10 + int(index * 75 / max(1, len(slugs)))
+            platform_end = 10 + int((index + 1) * 75 / max(1, len(slugs)))
+            emit_job_progress(progress, f"开始扫描 {adapter.platform_name}", platform_start)
             try:
-                items = adapter.fetch_assignments(headless=True)
+                items = adapter.fetch_assignments(
+                    headless=True,
+                    progress=platform_progress_adapter(progress, start=platform_start, end=platform_end),
+                )
             except (LoginRequiredError, PageStructureChangedError, PlaywrightUnavailableError) as exc:
                 errors.append(f"{adapter.platform_name}: {exc}")
+                emit_job_progress(progress, f"{adapter.platform_name} 扫描失败：{exc}", platform_end)
                 continue
+            emit_job_progress(progress, f"{adapter.platform_name}：写入数据库 {len(items)} 条", platform_end)
             for item in items:
-                _, was_created = db.add_assignment(
+                assignment, was_created = db.add_assignment(
                     title=item.title,
                     course=item.course,
                     platform=item.platform,
@@ -533,18 +589,24 @@ def scan_user_homework(user: WebUser) -> str:
                     status=item.status,
                     url=item.url,
                 )
+                if assignment.id is not None and platform_status_is_done(item.status):
+                    assignment = db.mark_done(assignment.id)
                 seen += 1
                 created += 1 if was_created else 0
+            emit_job_progress(progress, f"{adapter.platform_name}：完成，识别 {len(items)} 条", platform_end)
+        emit_job_progress(progress, "补齐本周固定作业", 90)
         materialize_recurring_assignments(db, now=now_local(), horizon_days=7)
     finally:
         db.close()
     message = f"扫描完成：识别 {seen} 条，新增 {created} 条"
     if errors:
         message += "；部分平台失败：" + "；".join(errors[:2])
+    emit_job_progress(progress, message, 100)
     return message
 
 
-def send_user_report(user: WebUser) -> str:
+def send_user_report(user: WebUser, *, progress: JobProgress | None = None) -> str:
+    emit_job_progress(progress, "准备生成日报", 10)
     db = HomeworkDB(user_homework_db_path(user.id))
     try:
         now = now_local()
@@ -552,23 +614,29 @@ def send_user_report(user: WebUser) -> str:
         assignments = db.list_assignments(include_done=False)
     finally:
         db.close()
+    emit_job_progress(progress, "连接 SMTP 并发送日报", 70)
     config = email_config_for_recipient(user.report_email)
     subject = send_email_report(assignments, config=config, now=now)
+    emit_job_progress(progress, f"已发送：{subject}", 100)
     return f"已发送：{subject}"
 
 
-def daily_user_run(user: WebUser) -> str:
-    scan_message = scan_user_homework(user)
-    report_message = send_user_report(user)
+def daily_user_run(user: WebUser, *, progress: JobProgress | None = None) -> str:
+    scan_message = scan_user_homework(user, progress=lambda message, percent=None: emit_job_progress(progress, message, scale_progress(percent, 0, 70)))
+    report_message = send_user_report(user, progress=lambda message, percent=None: emit_job_progress(progress, message, scale_progress(percent, 70, 100)))
     return f"{scan_message}；{report_message}"
 
 
-def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Callable[[], str]) -> WebJob:
+def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Callable[[JobProgress], str]) -> WebJob:
     job = store.create_job(user_id=user.id, kind=kind)
 
     def runner() -> None:
+        def report_progress(message: str, percent: int | None = None) -> None:
+            store.update_job_progress(job_id=job.id, message=message, progress=percent)
+
         try:
-            message = task()
+            report_progress("正在运行", 5)
+            message = task(report_progress)
         except Exception as exc:
             store.finish_job(job_id=job.id, status="failed", message=str(exc))
         else:
@@ -576,6 +644,31 @@ def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Cal
 
     threading.Thread(target=runner, daemon=True).start()
     return job
+
+
+def emit_job_progress(progress: JobProgress | None, message: str, percent: int | None = None) -> None:
+    if progress is not None:
+        progress(message, percent)
+
+
+def platform_progress_adapter(progress: JobProgress | None, *, start: int, end: int):
+    def report(message: str) -> None:
+        percent = start + 2
+        match = re.search(r"扫描课程\s+(\d+)/(\d+)", message)
+        if match:
+            current, total = int(match.group(1)), max(1, int(match.group(2)))
+            percent = start + int((end - start) * min(current, total) / total)
+        elif "完成" in message:
+            percent = end
+        emit_job_progress(progress, message, min(end, max(start, percent)))
+
+    return report
+
+
+def scale_progress(percent: int | None, start: int, end: int) -> int | None:
+    if percent is None:
+        return None
+    return start + int((end - start) * max(0, min(100, int(percent))) / 100)
 
 
 async def read_form(request) -> dict[str, str]:
@@ -781,6 +874,7 @@ def row_to_job(row) -> WebJob:
         kind=row["kind"],
         status=row["status"],
         message=row["message"],
+        progress=row["progress"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -796,18 +890,20 @@ def render_assignment_table(assignments) -> str:
     now = now_local()
     rows = [
         "<div class='table-wrap'><table>",
-        "<thead><tr><th>课程</th><th>作业</th><th>平台</th><th>截止</th><th>状态</th></tr></thead>",
+        "<thead><tr><th>课程</th><th>作业</th><th>平台</th><th>截止</th><th>状态</th><th>操作</th></tr></thead>",
         "<tbody>",
     ]
     for item in assignments:
         due_class = assignment_due_class(item, now)
+        status_label = "已完成" if assignment_is_done(item) else item.status or "未提交"
         rows.append(
             "<tr>"
             f"<td class='table-course'>{escape(item.course or '未填写')}</td>"
             f"<td><strong>{escape(item.title)}</strong></td>"
             f"<td>{escape(item.platform or '未填写')}</td>"
             f"<td><span class='status-badge {due_class}'>{escape(item.due_at.strftime('%Y-%m-%d %H:%M'))}</span></td>"
-            f"<td>{escape(item.status or '未提交')}</td>"
+            f"<td>{escape(status_label)}</td>"
+            f"<td>{render_assignment_action(item)}</td>"
             "</tr>"
         )
     rows.append("</tbody></table></div>")
@@ -824,13 +920,36 @@ def assignment_due_class(item, now) -> str:
     return "normal"
 
 
+def render_assignment_action(item) -> str:
+    if item.id is None or not is_recurring_assignment(item):
+        return "<span class='muted-text'>-</span>"
+    return (
+        f"<form method='post' action='/assignments/{item.id}/done' class='inline-form'>"
+        "<label class='check-control'>"
+        "<input type='checkbox' onchange='this.form.submit()'>"
+        "<span>完成</span>"
+        "</label>"
+        "</form>"
+    )
+
+
 def render_job_row(job: WebJob) -> str:
+    progress = max(0, min(100, job.progress))
+    progress_markup = ""
+    if job.status == "running":
+        progress_markup = (
+            "<div class='progress-line'>"
+            f"<div class='progress-track'><span style='width: {progress}%'></span></div>"
+            f"<span class='progress-value'>{progress}%</span>"
+            "</div>"
+        )
     return (
         "<div class='job-row'>"
         f"<span class='status-badge {job_status_class(job.status)}'>{escape(job_status_label(job.status))}</span>"
         f"<strong>{escape(job_kind_label(job.kind))}</strong>"
         f"<time>{escape(job.updated_at)}</time>"
         f"<p>{escape(job.message or '处理中')}</p>"
+        f"{progress_markup}"
         "</div>"
     )
 
@@ -1033,6 +1152,26 @@ def page(title: str, body: str, *, status_code: int = 200):
     tr:last-child td {{ border-bottom: 0; }}
     td strong {{ display: block; line-height: 1.35; }}
     .table-course {{ width: 20%; font-weight: 700; }}
+    .inline-form {{ margin: 0; }}
+    .check-control {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 30px;
+      margin: 0;
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .check-control input {{
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--primary);
+      cursor: pointer;
+    }}
     .status-badge {{
       display: inline-flex;
       align-items: center;
@@ -1055,6 +1194,10 @@ def page(title: str, body: str, *, status_code: int = 200):
     .job-row:last-child {{ border-bottom: 0; padding-bottom: 0; }}
     .job-row p {{ grid-column: 2 / -1; margin: 0; color: var(--muted); overflow-wrap: anywhere; }}
     .job-row time {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
+    .progress-line {{ grid-column: 2 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }}
+    .progress-track {{ height: 8px; overflow: hidden; border-radius: 999px; background: #e7e9e1; }}
+    .progress-track span {{ display: block; height: 100%; border-radius: inherit; background: var(--primary); }}
+    .progress-value {{ color: var(--muted); font-size: 12px; font-weight: 800; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
     .actions.vertical {{ display: grid; gap: 10px; }}
     .actions.vertical form, .actions.vertical button {{ width: 100%; }}

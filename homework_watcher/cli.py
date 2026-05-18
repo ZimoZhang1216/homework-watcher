@@ -15,6 +15,7 @@ from .notifier import Notifier
 from .parser import parse_assignments
 from .recurring_assignments import DEFAULT_RECURRING_HORIZON_DAYS, materialize_recurring_assignments
 from .reminders import remind_new_assignment, run_due_reminders
+from .statuses import assignment_is_done, platform_status_is_done, platform_status_is_unavailable
 from .summary import build_daily_summary
 
 
@@ -337,10 +338,10 @@ def print_assignments(assignments) -> None:
 
 
 def status_for(item, now) -> str:
+    if assignment_is_done(item):
+        return "已完成"
     if platform_status_is_unavailable(item.status):
         return "不可完成"
-    if item.is_done:
-        return "已完成"
     if item.due_at < now:
         return "逾期"
     if item.due_at.date() == now.date():
@@ -429,11 +430,3 @@ def print_scan_records(records: list[dict]) -> None:
             f"{action} #{assignment.id} [{item.platform}] {item.title} "
             f"截止 {human_datetime(item.due_at)} 状态 {item.status}{url}"
         )
-
-
-def platform_status_is_done(status: str) -> bool:
-    return any(marker in status for marker in ["已提交", "已完成", "已批改", "已评分"])
-
-
-def platform_status_is_unavailable(status: str) -> bool:
-    return "不可完成" in status

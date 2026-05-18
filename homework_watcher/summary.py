@@ -4,11 +4,12 @@ from datetime import datetime, timedelta
 
 from .datetime_utils import human_datetime, now_local
 from .models import Assignment
+from .statuses import assignment_is_pending
 
 
 def build_daily_summary(assignments: list[Assignment], *, now: datetime | None = None) -> str:
     now = now or now_local()
-    active = [item for item in assignments if not item.is_done]
+    active = [item for item in assignments if assignment_is_pending(item)]
     today = now.date()
     tomorrow = today + timedelta(days=1)
 

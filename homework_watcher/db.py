@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .datetime_utils import from_iso, now_local, to_iso
 from .models import Assignment
+from .statuses import assignment_is_pending
 
 
 class HomeworkDB:
@@ -138,11 +139,13 @@ class HomeworkDB:
         return row_to_assignment(row) if row else None
 
     def list_assignments(self, *, include_done: bool = False) -> list[Assignment]:
-        where = "" if include_done else "WHERE completed_at IS NULL AND status != '不可完成的作业'"
         rows = self.conn.execute(
-            f"SELECT * FROM assignments {where} ORDER BY due_at ASC, id ASC"
+            "SELECT * FROM assignments ORDER BY due_at ASC, id ASC"
         ).fetchall()
-        return [row_to_assignment(row) for row in rows]
+        assignments = [row_to_assignment(row) for row in rows]
+        if include_done:
+            return assignments
+        return [assignment for assignment in assignments if assignment_is_pending(assignment)]
 
     def mark_done(self, assignment_id: int) -> Assignment:
         timestamp = to_iso(now_local())

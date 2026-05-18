@@ -106,6 +106,31 @@ class DBAndReminderTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_platform_completed_assignments_are_not_active_or_overdue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = HomeworkDB(Path(tmp) / "homework.db")
+            try:
+                now = datetime(2026, 5, 15, 12, 0)
+                done, _ = db.add_assignment(
+                    title="已提交的旧作业",
+                    platform="小雅",
+                    due_at=datetime(2026, 5, 14, 23, 59),
+                    status="已完成",
+                )
+                active, _ = db.add_assignment(
+                    title="真正逾期作业",
+                    platform="小雅",
+                    due_at=datetime(2026, 5, 14, 23, 59),
+                    status="未提交",
+                )
+
+                self.assertEqual([item.id for item in db.list_assignments()], [active.id])
+                self.assertEqual(status_for(done, now), "已完成")
+                self.assertIn("真正逾期作业", build_daily_summary(db.list_assignments(), now=now))
+                self.assertNotIn("已提交的旧作业", build_daily_summary(db.list_assignments(), now=now))
+            finally:
+                db.close()
+
     def test_due_reminder_uses_most_urgent_pending_threshold(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = HomeworkDB(Path(tmp) / "homework.db")

@@ -51,6 +51,14 @@ class EmailReportTests(unittest.TestCase):
                 due_at=datetime(2026, 5, 16, 23, 59),
                 completed_at=datetime(2026, 5, 15, 9, 0),
             ),
+            Assignment(
+                id=6,
+                title="平台显示已完成",
+                course="分析化学",
+                platform="小雅",
+                due_at=datetime(2026, 5, 14, 23, 59),
+                status="已完成",
+            ),
         ]
 
         subject = build_email_subject(assignments, now=now)
@@ -70,6 +78,7 @@ class EmailReportTests(unittest.TestCase):
         self.assertLess(body.index(today_line), body.index(future_line))
         self.assertNotIn("下周固定作业", body)
         self.assertNotIn("已完成作业", body)
+        self.assertNotIn("平台显示已完成", body)
         self.assertNotIn("链接：", body)
         self.assertNotIn("状态：", body)
         self.assertNotIn("⚠️", body)

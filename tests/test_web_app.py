@@ -3,10 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 try:
     import homework_watcher.web_app as web_app
+    from homework_watcher.db import HomeworkDB
+    from homework_watcher.platforms.base import PlatformAssignment
+    from homework_watcher.recurring_assignments import materialize_recurring_assignments
     from homework_watcher.web_app import LoginSessionManager, WebStore, WebUser
 except ModuleNotFoundError as exc:
     if exc.name != "fastapi":
@@ -49,10 +53,103 @@ class WebAppTest(unittest.TestCase):
                 password="long-enough-password",
             )
             job = store.create_job(user_id=user.id, kind="scan")
+            store.update_job_progress(job_id=job.id, message="扫描小雅", progress=45)
+            updated_job = store.get_job(job.id)
 
         self.assertEqual(user.email, "demo@example.com")
         self.assertEqual(job.kind, "scan")
         self.assertEqual(job.status, "running")
+        self.assertEqual(updated_job.message, "扫描小雅")
+        self.assertEqual(updated_job.progress, 45)
+
+    def test_recurring_assignments_can_be_marked_done_from_dashboard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_web_dir = web_app.WEB_DIR
+            web_app.WEB_DIR = Path(tmp)
+            try:
+                store = WebStore(Path(tmp) / "web.db")
+                user = WebUser(
+                    id=1,
+                    email="demo@example.com",
+                    report_email="demo@example.com",
+                    created_at="2026-05-18 08:00:00",
+                )
+                db = HomeworkDB(web_app.user_homework_db_path(user.id))
+                try:
+                    materialize_recurring_assignments(db, now=datetime(2026, 5, 18, 8, 0), horizon_days=7)
+                    assignment = db.list_assignments()[0]
+                finally:
+                    db.close()
+
+                html = web_app.dashboard_page(user, store, LoginSessionManager()).body.decode("utf-8")
+                self.assertIn(f"/assignments/{assignment.id}/done", html)
+
+                db = HomeworkDB(web_app.user_homework_db_path(user.id))
+                try:
+                    db.mark_done(assignment.id)
+                    active_ids = [item.id for item in db.list_assignments()]
+                finally:
+                    db.close()
+            finally:
+                web_app.WEB_DIR = original_web_dir
+
+        self.assertNotIn(assignment.id, active_ids)
+
+    def test_web_scan_marks_platform_done_assignments_completed(self):
+        class FakeAdapter:
+            platform_name = "小雅"
+            slug = "xiaoya"
+
+            def __init__(self, *, profile_root):
+                self.profile_root = profile_root
+
+            def fetch_assignments(self, *, headless=True, progress=None):
+                if progress is not None:
+                    progress("小雅：扫描课程 1/1 测试课程")
+                return [
+                    PlatformAssignment(
+                        title="已完成旧作业",
+                        course="测试课程",
+                        platform="小雅",
+                        due_at=datetime(2026, 5, 14, 23, 59),
+                        status="已完成",
+                        url="https://example.test/task",
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original_web_dir = web_app.WEB_DIR
+            original_slugs = web_app.canonical_slugs
+            original_adapters = web_app.ADAPTER_CLASSES
+            messages = []
+            web_app.WEB_DIR = Path(tmp)
+            web_app.canonical_slugs = lambda: ["xiaoya"]
+            web_app.ADAPTER_CLASSES = {"xiaoya": FakeAdapter}
+            try:
+                user = WebUser(
+                    id=1,
+                    email="demo@example.com",
+                    report_email="demo@example.com",
+                    created_at="2026-05-18 08:00:00",
+                )
+                web_app.scan_user_homework(user, progress=lambda message, percent=None: messages.append((message, percent)))
+                db = HomeworkDB(web_app.user_homework_db_path(user.id))
+                try:
+                    all_items = db.list_assignments(include_done=True)
+                    active_items = db.list_assignments()
+                finally:
+                    db.close()
+            finally:
+                web_app.WEB_DIR = original_web_dir
+                web_app.canonical_slugs = original_slugs
+                web_app.ADAPTER_CLASSES = original_adapters
+
+        done_items = [item for item in all_items if item.title == "已完成旧作业"]
+        active_titles = {item.title for item in active_items}
+        self.assertEqual(len(done_items), 1)
+        self.assertTrue(done_items[0].is_done)
+        self.assertNotIn("已完成旧作业", active_titles)
+        self.assertTrue(any(percent == 100 for _, percent in messages))
 
     def test_platform_login_manager_uses_async_playwright(self):
         class FakePage:
