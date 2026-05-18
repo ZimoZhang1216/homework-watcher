@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
 
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+
 from .config import APP_DIR
 from .datetime_utils import now_local
 from .db import HomeworkDB
@@ -247,9 +250,6 @@ class LoginSessionManager:
 
 
 def create_app():
-    from fastapi import FastAPI, Request
-    from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
-
     store = WebStore()
     login_manager = LoginSessionManager()
     app = FastAPI(title="homework-watcher web")
@@ -729,8 +729,6 @@ def message_page(title: str, message: str) -> str:
 
 
 def page(title: str, body: str, *, status_code: int = 200):
-    from fastapi.responses import HTMLResponse
-
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
