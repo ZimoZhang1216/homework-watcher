@@ -62,6 +62,7 @@ fi
 # noVNC is exposed through nginx /vnc/; the internal websockify listener should
 # not be reachable directly if a broad security group rule exists.
 sed -i 's/0\.0\.0\.0:6080/127.0.0.1:6080/' "$APP_DIR/deploy/start-web.sh"
+chmod +x "$APP_DIR/deploy/start-web.sh"
 
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
