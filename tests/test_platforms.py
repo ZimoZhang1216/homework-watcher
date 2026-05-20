@@ -9,9 +9,11 @@ from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapte
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
 from homework_watcher.platforms.xiaoya import (
+    TaskRowCandidate,
     collect_current_page_course_names,
     parse_xiaoya_task_block,
     parse_xiaoya_row,
+    should_open_task_detail,
     task_url_for,
 )
 
@@ -175,6 +177,23 @@ class PlatformAdapterTests(unittest.TestCase):
         )
 
         self.assertIsNone(item)
+
+    def test_xiaoya_pending_row_without_link_should_open_detail(self):
+        pending = TaskRowCandidate(
+            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
+            cells=["作业-08", "\\", "作业", "进行中", "全体", "全体", "2026-05-06 10:00"],
+            text="作业-08 \\ 作业 进行中 全体 全体 2026-05-06 10:00",
+            url="",
+        )
+        completed = TaskRowCandidate(
+            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
+            cells=["作业-01", "\\", "作业", "已完成", "全体", "全体", "2026-03-12 10:00"],
+            text="作业-01 \\ 作业 已完成 全体 全体 2026-03-12 10:00",
+            url="",
+        )
+
+        self.assertTrue(should_open_task_detail(pending))
+        self.assertFalse(should_open_task_detail(completed))
 
     def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
         class FakePage:

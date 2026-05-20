@@ -352,6 +352,7 @@ def parse_xiaoya_task_page(
     deadline: float | None = None,
     max_pages: int = 20,
 ) -> list[PlatformAssignment]:
+    prefer_pending_task_filter(page)
     assignments = collect_visible_task_items(page, course=course, platform=platform)
     for _ in range(max_pages):
         if deadline is not None:
@@ -496,13 +497,13 @@ def parse_xiaoya_row_candidate(
 
 def should_open_task_detail(candidate: TaskRowCandidate) -> bool:
     text = "\n".join([*candidate.cells, candidate.text])
-    if not candidate.url or candidate.url.startswith(("javascript:", "#")):
-        return False
     if not re.search(r"作业|任务|实习|练习|测验|问卷", text):
         return False
     if re.search(r"已完成|已提交|已批改", text) and not re.search(r"进行中|未完成|未提交|待完成", text):
         return False
-    return True
+    if candidate.url and not candidate.url.startswith(("javascript:", "#")):
+        return True
+    return bool(first_task_title_from_candidate(candidate))
 
 
 def collect_task_detail_items(
@@ -515,38 +516,161 @@ def collect_task_detail_items(
     assignments: list[PlatformAssignment] = []
     seen_urls: set[str] = set()
     for candidate in candidates[:40]:
-        target_url = urljoin(page.url, candidate.url)
-        if target_url in seen_urls:
-            continue
-        seen_urls.add(target_url)
-        detail_page = page.context.new_page()
-        try:
-            detail_page.goto(target_url, wait_until="domcontentloaded", timeout=12_000)
-            wait_for_detail_page(detail_page)
-            text = safe_body_text(detail_page)
-            item = parse_xiaoya_task_block(text, course=course, platform=platform, url=detail_page.url)
-            if item is None:
-                due_at = find_xiaoya_due_datetime(text)
-                title = first_task_title_from_candidate(candidate)
-                if due_at is not None and title:
-                    item = PlatformAssignment(
-                        title=title,
-                        course=course,
-                        platform=platform,
-                        due_at=due_at,
-                        status=guess_row_status([*candidate.cells, text]),
-                        url=detail_page.url,
-                    )
-            if item is not None:
-                assignments.append(item)
-        except Exception:
-            continue
-        finally:
-            try:
-                detail_page.close()
-            except Exception:
-                pass
+        if candidate.url and not candidate.url.startswith(("javascript:", "#")):
+            target_url = urljoin(page.url, candidate.url)
+            if target_url in seen_urls:
+                continue
+            seen_urls.add(target_url)
+            item = collect_task_detail_item_by_url(page, target_url, candidate, course=course, platform=platform)
+        else:
+            item = collect_task_detail_item_by_click(page, candidate, course=course, platform=platform)
+        if item is not None:
+            assignments.append(item)
     return assignments
+
+
+def collect_task_detail_item_by_url(
+    page,
+    target_url: str,
+    candidate: TaskRowCandidate,
+    *,
+    course: str,
+    platform: str,
+) -> PlatformAssignment | None:
+    detail_page = page.context.new_page()
+    try:
+        detail_page.goto(target_url, wait_until="domcontentloaded", timeout=12_000)
+        wait_for_detail_page(detail_page)
+        return parse_detail_page_assignment(detail_page, candidate, course=course, platform=platform)
+    except Exception:
+        return None
+    finally:
+        try:
+            detail_page.close()
+        except Exception:
+            pass
+
+
+def collect_task_detail_item_by_click(
+    page,
+    candidate: TaskRowCandidate,
+    *,
+    course: str,
+    platform: str,
+) -> PlatformAssignment | None:
+    title = first_task_title_from_candidate(candidate)
+    if not title:
+        return None
+    original_url = page.url
+    try:
+        if not click_task_row_by_title(page, title):
+            return None
+        wait_for_detail_page(page)
+        return parse_detail_page_assignment(page, candidate, course=course, platform=platform)
+    except Exception:
+        return None
+    finally:
+        restore_task_list_page(page, original_url)
+
+
+def parse_detail_page_assignment(page, candidate: TaskRowCandidate, *, course: str, platform: str) -> PlatformAssignment | None:
+    text = safe_body_text(page)
+    due_at = find_xiaoya_due_datetime(text)
+    title = first_task_title_from_candidate(candidate)
+    if due_at is not None and title:
+        return PlatformAssignment(
+            title=title,
+            course=course,
+            platform=platform,
+            due_at=due_at,
+            status=guess_row_status([*candidate.cells, text]),
+            url=page.url,
+        )
+    item = parse_xiaoya_task_block(text, course=course, platform=platform, url=page.url)
+    if item is not None:
+        return item
+    if due_at is None or not title:
+        return None
+    return PlatformAssignment(
+        title=title,
+        course=course,
+        platform=platform,
+        due_at=due_at,
+        status=guess_row_status([*candidate.cells, text]),
+        url=page.url,
+    )
+
+
+def click_task_row_by_title(page, title: str) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                title => {
+                  const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+                  const rows = Array.from(document.querySelectorAll('tbody tr'))
+                    .filter(row => !row.classList.contains('ant-table-measure-row'));
+                  const row = rows.find(node => compact(node.innerText || node.textContent).includes(title));
+                  if (!row) return false;
+                  const candidates = Array.from(row.querySelectorAll('a, button, [role="button"], [onclick], td, span'))
+                    .filter(node => compact(node.innerText || node.textContent).includes(title));
+                  const target = candidates[0] || row;
+                  const options = { bubbles: true, cancelable: true, view: window };
+                  target.dispatchEvent(new MouseEvent('mousedown', options));
+                  target.dispatchEvent(new MouseEvent('mouseup', options));
+                  target.dispatchEvent(new MouseEvent('click', options));
+                  return true;
+                }
+                """,
+                title,
+            )
+        )
+    except Exception:
+        return False
+
+
+def restore_task_list_page(page, original_url: str) -> None:
+    try:
+        if page.url != original_url:
+            page.go_back(wait_until="domcontentloaded", timeout=8_000)
+            wait_for_detail_page(page)
+            return
+    except Exception:
+        pass
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    try:
+        close_button = page.locator(".ant-modal-close, .ant-drawer-close, button[aria-label='Close']").first
+        if close_button.count() > 0:
+            close_button.click(timeout=1_000)
+    except Exception:
+        pass
+
+
+def prefer_pending_task_filter(page) -> None:
+    try:
+        changed = page.evaluate(
+            """
+            () => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const labels = Array.from(document.querySelectorAll('label, .ant-checkbox-wrapper'));
+              const label = labels.find(node => compact(node.innerText || node.textContent).includes('仅关注待完成任务'));
+              if (!label) return false;
+              const input = label.querySelector('input[type="checkbox"]');
+              const checked = !!(input && input.checked);
+              if (checked) return false;
+              const target = input || label.querySelector('.ant-checkbox, span') || label;
+              target.click();
+              return true;
+            }
+            """
+        )
+        if changed:
+            wait_for_detail_page(page)
+    except Exception:
+        pass
 
 
 def wait_for_detail_page(page) -> None:
