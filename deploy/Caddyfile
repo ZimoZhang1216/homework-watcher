@@ -16,6 +16,10 @@
 		reverse_proxy app:6080
 	}
 
+	handle /websockify {
+		reverse_proxy app:6080
+	}
+
 	handle {
 		reverse_proxy app:8080
 	}

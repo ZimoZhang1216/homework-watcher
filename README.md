@@ -270,7 +270,7 @@ export SMTP_PASSWORD="smtp-password-or-app-password"
 export EMAIL_FROM="sender@example.com"
 export HW_WEB_SECRET_KEY="change-this-to-a-long-random-secret"
 export HW_WEB_ADMIN_TOKEN="change-this-admin-token"
-export HW_WEB_NOVNC_URL="https://your-domain.example/vnc.html?autoconnect=1&resize=scale"
+export HW_WEB_NOVNC_URL="https://your-domain.example/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify"
 hw-web
 ```
 

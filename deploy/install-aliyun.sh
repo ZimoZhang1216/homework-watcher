@@ -59,9 +59,6 @@ else
   git clone --depth 1 "$REPO_URL" "$APP_DIR"
 fi
 
-# noVNC is exposed through nginx /vnc/; the internal websockify listener should
-# not be reachable directly if a broad security group rule exists.
-sed -i 's/0\.0\.0\.0:6080/127.0.0.1:6080/' "$APP_DIR/deploy/start-web.sh"
 chmod +x "$APP_DIR/deploy/start-web.sh"
 
 python3 -m venv "$APP_DIR/.venv"
@@ -85,7 +82,7 @@ HW_WEB_DIR=$WEB_DIR
 HW_WEB_SECRET_KEY=$HW_WEB_SECRET_KEY
 HW_WEB_ADMIN_TOKEN=$HW_WEB_ADMIN_TOKEN
 HW_WEB_SECURE_COOKIES=0
-HW_WEB_NOVNC_URL=http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale
+HW_WEB_NOVNC_URL=http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
 NOVNC_PASSWORD=$NOVNC_PASSWORD
 SMTP_HOST=${SMTP_HOST:-}
 SMTP_PORT=${SMTP_PORT:-587}
@@ -154,6 +151,18 @@ server {
         proxy_read_timeout 86400;
     }
 
+    location /websockify {
+        proxy_pass http://127.0.0.1:6080/websockify;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -183,7 +192,7 @@ homework-watcher deployment
 URL: http://$PUBLIC_IP/
 Admin URL: http://$PUBLIC_IP/admin?token=$HW_WEB_ADMIN_TOKEN
 Admin token: $HW_WEB_ADMIN_TOKEN
-noVNC URL: http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale
+noVNC URL: http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
 noVNC password: $NOVNC_PASSWORD
 Environment file: $ENV_DIR/web.env
 Service: homework-watcher-web

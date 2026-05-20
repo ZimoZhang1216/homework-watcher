@@ -4,7 +4,7 @@ set -euo pipefail
 mkdir -p "${HW_WEB_DIR:-/data/web}"
 
 if [ -z "${HW_WEB_NOVNC_URL:-}" ] && [ -n "${APP_DOMAIN:-}" ]; then
-  export HW_WEB_NOVNC_URL="https://${APP_DOMAIN}/vnc/vnc.html?autoconnect=1&resize=scale"
+  export HW_WEB_NOVNC_URL="https://${APP_DOMAIN}/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify"
 fi
 
 Xvfb "${DISPLAY:-:99}" -screen 0 "${XVFB_SCREEN:-1440x1000x24}" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
@@ -30,6 +30,6 @@ if [ -n "${NOVNC_PASSWORD:-}" ]; then
 fi
 
 x11vnc "${vnc_args[@]}" >/tmp/x11vnc.log 2>&1 &
-websockify --web=/usr/share/novnc/ 0.0.0.0:6080 127.0.0.1:5900 >/tmp/websockify.log 2>&1 &
+websockify --web=/usr/share/novnc/ 127.0.0.1:6080 127.0.0.1:5900 >/tmp/websockify.log 2>&1 &
 
 exec hw-web

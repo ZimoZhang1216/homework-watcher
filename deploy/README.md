@@ -26,7 +26,7 @@ Set these values in `deploy/.env` before starting:
 - `SMTP_*` and `EMAIL_FROM`: sender mailbox settings.
 - `HW_WEB_SECRET_KEY`: long random value used to sign web sessions.
 - `HW_WEB_ADMIN_TOKEN`: long random value for `/admin/run-daily`.
-- `HW_WEB_NOVNC_URL`: `https://APP_DOMAIN/vnc/vnc.html?autoconnect=1&resize=scale`.
+- `HW_WEB_NOVNC_URL`: `https://APP_DOMAIN/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify`.
 - `NOVNC_PASSWORD`: optional noVNC password, at most 8 characters.
 
 Generate secrets on the VPS:
