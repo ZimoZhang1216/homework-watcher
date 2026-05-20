@@ -304,13 +304,33 @@ def click_pending_task_entry(page) -> bool:
             page.evaluate(
                 """
                 () => {
-                  const re = /待完成|待办|待处理|我的任务|任务中心/;
-                  const nodes = Array.from(document.querySelectorAll(
-                    'a, button, [role="button"], .ant-menu-item, .ant-tabs-tab, .ant-tabs-tab-btn, [class*="task"], [class*="todo"]'
-                  ));
-                  const target = nodes.find(node => re.test((node.innerText || node.textContent || '').trim()));
+                  const re = /待完成任务|待完成|待办|待处理|我的任务|任务中心/;
+                  const visible = node => {
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const score = node => {
+                    const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (!re.test(text) || !visible(node)) return -1;
+                    let value = text.includes('待完成任务') ? 100 : 40;
+                    value -= Math.min(text.length, 500) / 10;
+                    value -= Math.min(node.querySelectorAll('*').length, 100);
+                    return value;
+                  };
+                  const nodes = Array.from(document.querySelectorAll('body *'));
+                  const target = nodes
+                    .map(node => [node, score(node)])
+                    .filter(([, value]) => value >= 0)
+                    .sort((a, b) => b[1] - a[1])[0]?.[0];
                   if (!target) return false;
-                  target.click();
+                  const clickable = target.closest(
+                    'a, button, [role="button"], [onclick], .ant-card, .ant-statistic, .ant-col, .ant-row, [class*="card"], [class*="task"], [class*="todo"]'
+                  ) || target;
+                  const eventOptions = { bubbles: true, cancelable: true, view: window };
+                  clickable.dispatchEvent(new MouseEvent('mousedown', eventOptions));
+                  clickable.dispatchEvent(new MouseEvent('mouseup', eventOptions));
+                  clickable.dispatchEvent(new MouseEvent('click', eventOptions));
                   return true;
                 }
                 """
@@ -502,10 +522,12 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
             """
             () => Array.from(document.querySelectorAll('tbody tr, .ant-list-item, [class*="task"][class*="item"]'))
               .slice(0, 240)
-              .map(row => Array.from(row.querySelectorAll('td, .ant-list-item-meta-title, .ant-list-item-meta-description, [class*="cell"]'))
-                .map(cell => (cell.innerText || cell.textContent || '').replace(/\\s+/g, ' ').trim())
-                .filter(Boolean)
-              )
+              .map(row => {
+                const cells = Array.from(row.querySelectorAll('td, .ant-list-item-meta-title, .ant-list-item-meta-description, [class*="cell"]'))
+                  .map(cell => (cell.innerText || cell.textContent || '').trim())
+                  .filter(Boolean);
+                return cells.length ? cells : [(row.innerText || row.textContent || '').trim()];
+              })
               .filter(cells => cells.length)
             """
         )
@@ -513,7 +535,7 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
         row_texts = []
     assignments: list[PlatformAssignment] = []
     for raw_cells in row_texts:
-        cells = [compact_text(str(cell)) for cell in raw_cells if str(cell).strip()]
+        cells = normalize_xiaoya_cells([str(cell) for cell in raw_cells])
         item = parse_xiaoya_row(cells, course=course, platform=platform, url=page.url)
         if item is not None:
             assignments.append(item)
@@ -526,8 +548,9 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
         cells = row.locator("td")
         cell_texts: list[str] = []
         for cell_index in range(cells.count()):
-            text = compact_text(cells.nth(cell_index).inner_text(timeout=500))
+            text = cells.nth(cell_index).inner_text(timeout=500)
             cell_texts.append(text)
+        cell_texts = normalize_xiaoya_cells(cell_texts)
         item = parse_xiaoya_row(cell_texts, course=course, platform=platform, url=page.url)
         if item is not None:
             assignments.append(item)
@@ -591,7 +614,8 @@ def parse_xiaoya_row(
     platform: str,
     url: str,
 ) -> PlatformAssignment | None:
-    if len(cells) < 4:
+    cells = normalize_xiaoya_cells(cells)
+    if not cells:
         return None
     joined = "\n".join(cells)
     due_source = cells[8] if len(cells) > 8 and cells[8].strip() else joined
@@ -612,8 +636,23 @@ def parse_xiaoya_row(
     )
 
 
+def normalize_xiaoya_cells(cells: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for cell in cells:
+        for part in re.split(r"[\n\r]+", str(cell)):
+            value = compact_text(part)
+            if value:
+                normalized.append(value)
+    return normalized
+
+
 def infer_course_and_title(cells: list[str], *, fallback_course: str) -> tuple[str, str]:
     values = [cell.strip() for cell in cells if cell.strip()]
+    joined = "\n".join(values)
+    labeled_course = extract_labeled_value(joined, ["课程", "所属课程", "课程名称"])
+    labeled_title = extract_labeled_value(joined, ["作业", "任务", "标题", "名称"])
+    if labeled_title:
+        return fallback_course or labeled_course, labeled_title
     if fallback_course:
         return fallback_course, first_task_title(values)
     due_index = next((index for index, cell in enumerate(values) if find_datetime(cell) is not None), len(values))
@@ -627,6 +666,14 @@ def infer_course_and_title(cells: list[str], *, fallback_course: str) -> tuple[s
     if len(candidates) >= 2:
         return candidates[0], candidates[1]
     return "", first_task_title(values)
+
+
+def extract_labeled_value(text: str, labels: list[str]) -> str:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    match = re.search(rf"(?:{label_pattern})\s*[:：]\s*([^\n|，,]+)", text)
+    if match:
+        return match.group(1).strip()
+    return ""
 
 
 def first_task_title(cells: list[str]) -> str:

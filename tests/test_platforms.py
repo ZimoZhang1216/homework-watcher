@@ -9,6 +9,7 @@ from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapte
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
 from homework_watcher.platforms.xiaoya import (
+    click_pending_task_entry,
     collect_current_page_course_names,
     collect_visible_task_rows,
     derived_pending_task_urls,
@@ -168,11 +169,47 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(items[0].title, "第 7 次作业")
         self.assertEqual(items[0].status, "未提交")
 
+    def test_xiaoya_pending_task_card_text_can_be_parsed(self):
+        item = parse_xiaoya_row(
+            [
+                """
+                课程：结构化学
+                任务：第 8 次作业
+                类型：作业
+                状态：待完成
+                截止时间：2026-05-27 23:59
+                """
+            ],
+            course="",
+            platform="小雅",
+            url="https://example.test/todo",
+        )
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.course, "结构化学")
+        self.assertEqual(item.title, "第 8 次作业")
+        self.assertEqual(item.status, "未提交")
+
     def test_xiaoya_pending_task_urls_are_derived_from_mycourse(self):
         urls = derived_pending_task_urls("https://nankai.ai-augmented.com/app/jx-web/mycourse")
 
         self.assertIn("https://nankai.ai-augmented.com/app/jx-web/todo", urls)
         self.assertIn("https://nankai.ai-augmented.com/app/jx-web/task", urls)
+
+    def test_xiaoya_pending_task_click_searches_visible_card_text(self):
+        class FakePage:
+            def __init__(self):
+                self.script = ""
+
+            def evaluate(self, script):
+                self.script = script
+                return True
+
+        page = FakePage()
+
+        self.assertTrue(click_pending_task_entry(page))
+        self.assertIn("待完成任务", page.script)
+        self.assertIn("body *", page.script)
 
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(
