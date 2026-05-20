@@ -191,9 +191,16 @@ class PlatformAdapterTests(unittest.TestCase):
             text="作业-01 \\ 作业 已完成 全体 全体 2026-03-12 10:00",
             url="",
         )
+        statusless = TaskRowCandidate(
+            headers=["标题", "位置", "任务类型", "发布状态", "分配对象", "发布时间"],
+            cells=["作业-02", "\\", "作业", "全体", "全体", "2026-03-12 10:00"],
+            text="作业-02 \\ 作业 全体 全体 2026-03-12 10:00",
+            url="",
+        )
 
         self.assertTrue(should_open_task_detail(pending))
         self.assertFalse(should_open_task_detail(completed))
+        self.assertFalse(should_open_task_detail(statusless))
 
     def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
         class FakePage:

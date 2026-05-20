@@ -47,6 +47,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
     scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "600"))
     max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
     max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "80"))
+    max_detail_candidates_per_page = int(os.environ.get("HW_XIAOYA_MAX_DETAIL_CANDIDATES_PER_PAGE", "8"))
     candidate_selectors = [
         "[class*='homework' i]",
         "[class*='assignment' i]",
@@ -123,6 +124,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                             course=course_name,
                             platform=self.platform_name,
                             deadline=deadline,
+                            max_detail_candidates=self.max_detail_candidates_per_page,
                         )
                     except PlaywrightUnavailableError:
                         raise
@@ -351,15 +353,30 @@ def parse_xiaoya_task_page(
     platform: str,
     deadline: float | None = None,
     max_pages: int = 20,
+    max_detail_candidates: int = 8,
 ) -> list[PlatformAssignment]:
     prefer_pending_task_filter(page)
-    assignments = collect_visible_task_items(page, course=course, platform=platform)
+    assignments = collect_visible_task_items(
+        page,
+        course=course,
+        platform=platform,
+        deadline=deadline,
+        max_detail_candidates=max_detail_candidates,
+    )
     for _ in range(max_pages):
         if deadline is not None:
             ensure_scan_time_left(deadline, "读取任务列表")
         if not click_next_task_page(page, deadline=deadline):
             break
-        assignments.extend(collect_visible_task_items(page, course=course, platform=platform))
+        assignments.extend(
+            collect_visible_task_items(
+                page,
+                course=course,
+                platform=platform,
+                deadline=deadline,
+                max_detail_candidates=max_detail_candidates,
+            )
+        )
     if assignments:
         return dedupe_assignments(assignments)
 
@@ -370,9 +387,23 @@ def parse_xiaoya_task_page(
     return XiaoyaAdapter().parse_candidate_blocks(blocks, fallback_url=page.url, fallback_course=course)
 
 
-def collect_visible_task_items(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+def collect_visible_task_items(
+    page,
+    *,
+    course: str,
+    platform: str,
+    deadline: float | None = None,
+    max_detail_candidates: int = 8,
+) -> list[PlatformAssignment]:
     rows, unresolved = collect_visible_task_rows(page, course=course, platform=platform)
-    detail_items = collect_task_detail_items(page, unresolved, course=course, platform=platform)
+    detail_items = collect_task_detail_items(
+        page,
+        unresolved,
+        course=course,
+        platform=platform,
+        deadline=deadline,
+        max_candidates=max_detail_candidates,
+    )
     return dedupe_assignments([*rows, *detail_items, *collect_visible_task_blocks(page, course=course, platform=platform)])
 
 
@@ -499,7 +530,9 @@ def should_open_task_detail(candidate: TaskRowCandidate) -> bool:
     text = "\n".join([*candidate.cells, candidate.text])
     if not re.search(r"作业|任务|实习|练习|测验|问卷", text):
         return False
-    if re.search(r"已完成|已提交|已批改", text) and not re.search(r"进行中|未完成|未提交|待完成", text):
+    if not candidate_has_pending_marker(candidate):
+        return False
+    if candidate_has_done_marker(candidate):
         return False
     if candidate.url and not candidate.url.startswith(("javascript:", "#")):
         return True
@@ -512,18 +545,35 @@ def collect_task_detail_items(
     *,
     course: str,
     platform: str,
+    deadline: float | None = None,
+    max_candidates: int = 8,
 ) -> list[PlatformAssignment]:
     assignments: list[PlatformAssignment] = []
     seen_urls: set[str] = set()
-    for candidate in candidates[:40]:
+    for candidate in candidates[:max_candidates]:
+        if deadline is not None:
+            ensure_scan_time_left(deadline, "读取任务详情")
         if candidate.url and not candidate.url.startswith(("javascript:", "#")):
             target_url = urljoin(page.url, candidate.url)
             if target_url in seen_urls:
                 continue
             seen_urls.add(target_url)
-            item = collect_task_detail_item_by_url(page, target_url, candidate, course=course, platform=platform)
+            item = collect_task_detail_item_by_url(
+                page,
+                target_url,
+                candidate,
+                course=course,
+                platform=platform,
+                deadline=deadline,
+            )
         else:
-            item = collect_task_detail_item_by_click(page, candidate, course=course, platform=platform)
+            item = collect_task_detail_item_by_click(
+                page,
+                candidate,
+                course=course,
+                platform=platform,
+                deadline=deadline,
+            )
         if item is not None:
             assignments.append(item)
     return assignments
@@ -536,11 +586,12 @@ def collect_task_detail_item_by_url(
     *,
     course: str,
     platform: str,
+    deadline: float | None = None,
 ) -> PlatformAssignment | None:
     detail_page = page.context.new_page()
     try:
-        detail_page.goto(target_url, wait_until="domcontentloaded", timeout=12_000)
-        wait_for_detail_page(detail_page)
+        detail_page.goto(target_url, wait_until="domcontentloaded", timeout=detail_timeout_ms(deadline, 5_000))
+        wait_for_detail_page(detail_page, timeout_ms=detail_timeout_ms(deadline, 3_000), settle_ms=250)
         return parse_detail_page_assignment(detail_page, candidate, course=course, platform=platform)
     except Exception:
         return None
@@ -557,6 +608,7 @@ def collect_task_detail_item_by_click(
     *,
     course: str,
     platform: str,
+    deadline: float | None = None,
 ) -> PlatformAssignment | None:
     title = first_task_title_from_candidate(candidate)
     if not title:
@@ -565,7 +617,7 @@ def collect_task_detail_item_by_click(
     try:
         if not click_task_row_by_title(page, title):
             return None
-        wait_for_detail_page(page)
+        wait_for_detail_page(page, timeout_ms=detail_timeout_ms(deadline, 3_000), settle_ms=250)
         return parse_detail_page_assignment(page, candidate, course=course, platform=platform)
     except Exception:
         return None
@@ -633,7 +685,7 @@ def restore_task_list_page(page, original_url: str) -> None:
     try:
         if page.url != original_url:
             page.go_back(wait_until="domcontentloaded", timeout=8_000)
-            wait_for_detail_page(page)
+            wait_for_detail_page(page, timeout_ms=2_000, settle_ms=200)
             return
     except Exception:
         pass
@@ -673,15 +725,31 @@ def prefer_pending_task_filter(page) -> None:
         pass
 
 
-def wait_for_detail_page(page) -> None:
+def wait_for_detail_page(page, *, timeout_ms: int = 6_000, settle_ms: int = 600) -> None:
     try:
-        page.wait_for_load_state("networkidle", timeout=6_000)
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
     except Exception:
         pass
     try:
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(settle_ms)
     except Exception:
         pass
+
+
+def detail_timeout_ms(deadline: float | None, default_ms: int) -> int:
+    if deadline is None:
+        return default_ms
+    return remaining_timeout_ms(deadline, default_ms)
+
+
+def candidate_has_pending_marker(candidate: TaskRowCandidate) -> bool:
+    text = "\n".join([*candidate.cells, candidate.text])
+    return bool(re.search(r"进行中|未完成|未提交|待完成", text))
+
+
+def candidate_has_done_marker(candidate: TaskRowCandidate) -> bool:
+    text = "\n".join([*candidate.cells, candidate.text])
+    return bool(re.search(r"已完成|已提交|已批改", text) and not candidate_has_pending_marker(candidate))
 
 
 def first_task_title_from_candidate(candidate: TaskRowCandidate) -> str:
