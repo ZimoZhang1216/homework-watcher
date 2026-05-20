@@ -10,6 +10,7 @@ ENV_DIR="${ENV_DIR:-/etc/homework-watcher}"
 WEB_DIR="${WEB_DIR:-/var/lib/homework-watcher/web}"
 PUBLIC_IP="${PUBLIC_IP:-8.141.109.80}"
 REPO_URL="${REPO_URL:-https://github.com/ZimoZhang1216/homework-watcher.git}"
+REQUESTED_NOVNC_PASSWORD="${NOVNC_PASSWORD:-}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -47,7 +48,11 @@ fi
 
 : "${HW_WEB_SECRET_KEY:=$(openssl rand -hex 32)}"
 : "${HW_WEB_ADMIN_TOKEN:=$(openssl rand -hex 24)}"
-: "${NOVNC_PASSWORD:=$(openssl rand -hex 4)}"
+NOVNC_PASSWORD="$REQUESTED_NOVNC_PASSWORD"
+if [ -n "$NOVNC_PASSWORD" ] && [ "${#NOVNC_PASSWORD}" -gt 8 ]; then
+  echo "NOVNC_PASSWORD must be 8 characters or fewer because VNC passwords are limited to 8 characters." >&2
+  exit 2
+fi
 
 if [ -d "$APP_DIR/.git" ]; then
   log "updating repository"
@@ -187,13 +192,19 @@ systemctl restart homework-watcher-web
 
 sleep 10
 
+if [ -n "$NOVNC_PASSWORD" ]; then
+  NOVNC_PASSWORD_STATUS="enabled"
+else
+  NOVNC_PASSWORD_STATUS="disabled"
+fi
+
 cat >/root/homework-watcher-credentials.txt <<CREDS
 homework-watcher deployment
 URL: http://$PUBLIC_IP/
 Admin URL: http://$PUBLIC_IP/admin?token=$HW_WEB_ADMIN_TOKEN
 Admin token: $HW_WEB_ADMIN_TOKEN
 noVNC URL: http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
-noVNC password: $NOVNC_PASSWORD
+noVNC password: $NOVNC_PASSWORD_STATUS
 Environment file: $ENV_DIR/web.env
 Service: homework-watcher-web
 Log: journalctl -u homework-watcher-web -n 200 --no-pager
