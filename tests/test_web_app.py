@@ -39,10 +39,22 @@ class WebAppTest(unittest.TestCase):
                 web_app.WEB_DIR = original_web_dir
 
         self.assertIn("作业日报托管台", public_html)
+        self.assertIn(web_app.APP_VERSION, public_html)
         self.assertIn("auth-shell", public_html)
         self.assertIn("metric-grid", dashboard_html)
         self.assertIn("当前待办", dashboard_html)
         self.assertIn("平台登录态", dashboard_html)
+        self.assertIn(web_app.APP_VERSION, dashboard_html)
+
+    def test_novnc_url_is_normalized_for_vnc_proxy_path(self):
+        self.assertEqual(
+            web_app.normalize_novnc_url("http://example.test/vnc/vnc.html?autoconnect=1&resize=scale"),
+            "http://example.test/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc%2Fwebsockify",
+        )
+        self.assertEqual(
+            web_app.normalize_novnc_url("http://example.test/vnc/vnc.html?path=websockify"),
+            "http://example.test/vnc/vnc.html?path=vnc%2Fwebsockify&autoconnect=1&resize=scale",
+        )
 
     def test_web_store_can_return_created_records(self):
         with tempfile.TemporaryDirectory() as tmp:

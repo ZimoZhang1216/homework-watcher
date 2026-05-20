@@ -14,7 +14,7 @@ from email.utils import parseaddr
 from html import escape
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -44,6 +44,8 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
+APP_VERSION = "V-01.00"
+NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
@@ -402,7 +404,7 @@ def create_app():
     @app.get("/remote-login", response_class=HTMLResponse)
     async def remote_login(request: Request):
         user = require_user(request, store)
-        return remote_login_page(user, login_manager)
+        return remote_login_page(request, user, login_manager)
 
     @app.post("/remote-login/finish")
     async def finish_remote_login(request: Request):
@@ -452,12 +454,12 @@ def create_app():
 
 
 def public_home() -> str:
-    return """
+    return f"""
     <section class="auth-shell">
       <div class="brand-panel">
         <div class="brand-mark">HW</div>
         <p class="eyebrow">Homework Watcher</p>
-        <h1>作业日报托管台</h1>
+        <h1>作业日报托管台 <span class="version-badge">{APP_VERSION}</span></h1>
         <div class="boundary-list" aria-label="安全边界">
           <span>不保存平台密码</span>
           <span>手动完成验证码</span>
@@ -498,7 +500,7 @@ def dashboard_page(user: WebUser, store: WebStore, login_manager: LoginSessionMa
     next_due = min(assignments, key=lambda item: item.due_at, default=None)
     body = [
         "<header class='app-header'>",
-        "<div><p class='eyebrow'>Dashboard</p>",
+        f"<div><p class='eyebrow'>Homework Watcher <span class='version-badge compact'>{APP_VERSION}</span></p>",
         f"<h1>{escape(user.email)}</h1></div>",
         "<form method='post' action='/logout'><button class='ghost'>退出</button></form>",
         "</header>",
@@ -562,7 +564,7 @@ def dashboard_page(user: WebUser, store: WebStore, login_manager: LoginSessionMa
     return page("Dashboard", "\n".join(body))
 
 
-def remote_login_page(user: WebUser, login_manager: LoginSessionManager):
+def remote_login_page(request: Request, user: WebUser, login_manager: LoginSessionManager):
     active = login_manager.status_for(user_id=user.id)
     if active is None:
         return page("远程登录", message_page("没有远程登录会话", "请从首页选择一个平台开始登录。"))
@@ -570,12 +572,8 @@ def remote_login_page(user: WebUser, login_manager: LoginSessionManager):
         return page("远程登录占用中", message_page("远程登录占用中", "已有其他同学正在登录，请稍后再试。"), status_code=409)
     expires_in = int(active.get("expires_in_seconds", 0))
     expires_text = f"{max(1, (expires_in + 59) // 60)} 分钟内未完成会自动释放"
-    novnc_url = os.environ.get("HW_WEB_NOVNC_URL", "").strip()
-    link = (
-        f"<p><a class='button' target='_blank' rel='noreferrer' href='{escape(novnc_url)}'>打开远程浏览器</a></p>"
-        if novnc_url
-        else "<p class='callout warn'>未配置 HW_WEB_NOVNC_URL。请部署 noVNC 后把公开访问地址写入该环境变量。</p>"
-    )
+    novnc_url = build_novnc_url(request)
+    link = f"<p><a class='button' target='_blank' rel='noreferrer' href='{escape(novnc_url)}'>打开远程浏览器</a></p>"
     return page(
         "远程登录",
         f"""
@@ -598,6 +596,24 @@ def remote_login_page(user: WebUser, login_manager: LoginSessionManager):
         </section>
         """,
     )
+
+
+def build_novnc_url(request: Request) -> str:
+    configured = os.environ.get("HW_WEB_NOVNC_URL", "").strip()
+    if not configured:
+        configured = f"{str(request.base_url).rstrip('/')}/vnc/vnc.html"
+    return normalize_novnc_url(configured)
+
+
+def normalize_novnc_url(url: str) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("autoconnect", "1")
+    query.setdefault("resize", "scale")
+    if query.get("path", "") in {"", "websockify"}:
+        query["path"] = NOVNC_WEBSOCKET_PATH
+    path = parts.path or "/vnc/vnc.html"
+    return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query), parts.fragment))
 
 
 def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) -> str:
@@ -1122,6 +1138,27 @@ def page(title: str, body: str, *, status_code: int = 200):
       box-shadow: var(--shadow);
     }}
     .brand-panel h1 {{ max-width: 680px; }}
+    .version-badge {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      margin-left: 8px;
+      padding: 3px 8px;
+      border: 1px solid #b9c8c0;
+      border-radius: 7px;
+      background: var(--green-soft);
+      color: var(--primary-dark);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1;
+      vertical-align: middle;
+    }}
+    .version-badge.compact {{
+      min-height: 22px;
+      margin-left: 6px;
+      padding: 2px 6px;
+      font-size: 11px;
+    }}
     .eyebrow {{
       margin: 18px 0 10px;
       color: var(--primary);
