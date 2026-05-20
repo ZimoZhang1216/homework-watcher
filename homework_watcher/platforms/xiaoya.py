@@ -36,7 +36,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         "HW_XIAOYA_URL",
         "https://nankai.ai-augmented.com/app/jx-web/mycourse",
     )
-    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "120"))
+    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "600"))
     max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
     max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "80"))
     candidate_selectors = [

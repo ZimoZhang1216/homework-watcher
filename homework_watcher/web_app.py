@@ -44,12 +44,12 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.5"
+APP_VERSION = "V-1.6"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
-WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "240"))
+WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "900"))
 JobProgress = Callable[[str, int | None], None]
 
 

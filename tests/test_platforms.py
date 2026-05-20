@@ -25,6 +25,9 @@ class PlatformAdapterTests(unittest.TestCase):
         )
         self.assertEqual([adapter.slug for adapter in iter_adapters(["all"])], ["changjiang-yuketang", "xiaoya"])
 
+    def test_xiaoya_default_scan_timeout_handles_many_courses(self):
+        self.assertGreaterEqual(get_adapter("xiaoya").scan_timeout_seconds, 600)
+
     def test_adapter_parses_unified_assignment_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             adapter = get_adapter("xiaoya")
