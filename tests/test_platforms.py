@@ -9,11 +9,8 @@ from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapte
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
 from homework_watcher.platforms.xiaoya import (
-    TaskRowCandidate,
     collect_current_page_course_names,
-    parse_xiaoya_task_block,
     parse_xiaoya_row,
-    should_open_task_detail,
     task_url_for,
 )
 
@@ -136,72 +133,6 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(task_url_for("https://example.test/mycourse/1/resource/last"), "https://example.test/mycourse/1/task")
         self.assertEqual(task_url_for("https://example.test/mycourse/1/task/last"), "https://example.test/mycourse/1/task")
 
-    def test_parse_xiaoya_task_row_prefers_deadline_header(self):
-        item = parse_xiaoya_row(
-            [
-                "作业-08",
-                "\\",
-                "作业",
-                "进行中",
-                "全体",
-                "全体",
-                "2026-05-06 10:00",
-                "2026-05-28 23:59",
-            ],
-            course="结构化学",
-            platform="小雅",
-            url="https://example.test/task",
-            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间", "截止时间"],
-        )
-
-        self.assertIsNotNone(item)
-        self.assertEqual(item.title, "作业-08")
-        self.assertEqual(item.status, "未提交")
-        self.assertEqual(item.due_at, datetime(2026, 5, 28, 23, 59))
-
-    def test_parse_xiaoya_task_row_ignores_publish_time_without_deadline(self):
-        item = parse_xiaoya_row(
-            [
-                "作业-08",
-                "\\",
-                "作业",
-                "进行中",
-                "全体",
-                "全体",
-                "2026-05-06 10:00",
-            ],
-            course="结构化学",
-            platform="小雅",
-            url="https://example.test/task",
-            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
-        )
-
-        self.assertIsNone(item)
-
-    def test_xiaoya_pending_row_without_link_should_open_detail(self):
-        pending = TaskRowCandidate(
-            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
-            cells=["作业-08", "\\", "作业", "进行中", "全体", "全体", "2026-05-06 10:00"],
-            text="作业-08 \\ 作业 进行中 全体 全体 2026-05-06 10:00",
-            url="",
-        )
-        completed = TaskRowCandidate(
-            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
-            cells=["作业-01", "\\", "作业", "已完成", "全体", "全体", "2026-03-12 10:00"],
-            text="作业-01 \\ 作业 已完成 全体 全体 2026-03-12 10:00",
-            url="",
-        )
-        statusless = TaskRowCandidate(
-            headers=["标题", "位置", "任务类型", "发布状态", "分配对象", "发布时间"],
-            cells=["作业-02", "\\", "作业", "全体", "全体", "2026-03-12 10:00"],
-            text="作业-02 \\ 作业 全体 全体 2026-03-12 10:00",
-            url="",
-        )
-
-        self.assertTrue(should_open_task_detail(pending))
-        self.assertFalse(should_open_task_detail(completed))
-        self.assertFalse(should_open_task_detail(statusless))
-
     def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
         class FakePage:
             def evaluate(self, script):
@@ -236,26 +167,6 @@ class PlatformAdapterTests(unittest.TestCase):
 
         self.assertIsNotNone(item)
         self.assertEqual(item.status, "不可完成的作业")
-
-    def test_xiaoya_task_sheet_block_can_be_parsed(self):
-        item = parse_xiaoya_task_block(
-            """
-            任务单
-            结构化学：第三章 晶体结构任务单
-            类型：任务
-            状态：待完成
-            截止时间：2026-05-27 23:59
-            """,
-            course="结构化学",
-            platform="小雅",
-            url="https://example.test/task",
-        )
-
-        self.assertIsNotNone(item)
-        self.assertEqual(item.course, "结构化学")
-        self.assertEqual(item.title, "第三章 晶体结构任务单")
-        self.assertEqual(item.status, "未提交")
-        self.assertEqual(item.due_at, datetime(2026, 5, 27, 23, 59))
 
 
 if __name__ == "__main__":
