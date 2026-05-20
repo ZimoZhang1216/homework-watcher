@@ -226,6 +226,97 @@ class WebAppTest(unittest.TestCase):
         self.assertTrue(context.closed)
         self.assertTrue(playwright.stopped)
 
+    def test_platform_login_manager_reuses_and_expires_sessions(self):
+        class FakePage:
+            async def goto(self, *args, **kwargs):
+                pass
+
+        class FakeContext:
+            def __init__(self):
+                self.pages = [FakePage()]
+                self.closed = False
+
+            async def new_page(self):
+                page = FakePage()
+                self.pages.append(page)
+                return page
+
+            async def close(self):
+                self.closed = True
+
+        class FakeChromium:
+            def __init__(self, contexts):
+                self.contexts = contexts
+                self.launch_count = 0
+
+            async def launch_persistent_context(self, **kwargs):
+                self.launch_count += 1
+                context = FakeContext()
+                self.contexts.append(context)
+                return context
+
+        class FakePlaywright:
+            def __init__(self, contexts):
+                self.chromium = FakeChromium(contexts)
+                self.stopped = False
+
+            async def stop(self):
+                self.stopped = True
+
+        class FakePlaywrightFactory:
+            def __init__(self, playwrights, contexts):
+                self.playwrights = playwrights
+                self.contexts = contexts
+
+            async def start(self):
+                playwright = FakePlaywright(self.contexts)
+                self.playwrights.append(playwright)
+                return playwright
+
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                original_web_dir = web_app.WEB_DIR
+                original_loader = web_app.load_async_playwright_for_web
+                playwrights = []
+                contexts = []
+                web_app.WEB_DIR = Path(tmp)
+                web_app.load_async_playwright_for_web = (
+                    lambda: (lambda: FakePlaywrightFactory(playwrights, contexts), Exception)
+                )
+                try:
+                    manager = LoginSessionManager()
+                    user = WebUser(
+                        id=1,
+                        email="demo@example.com",
+                        report_email="demo@example.com",
+                        created_at="2026-05-18 08:00:00",
+                    )
+                    other_user = WebUser(
+                        id=2,
+                        email="other@example.com",
+                        report_email="other@example.com",
+                        created_at="2026-05-18 08:00:00",
+                    )
+                    await manager.start(user=user, platform="xiaoya")
+                    await manager.start(user=user, platform="changjiang-yuketang")
+                    launch_count_after_reuse = len(playwrights)
+                    with manager.lock:
+                        manager.active["started_monotonic"] -= web_app.LOGIN_SESSION_TTL_SECONDS + 1
+                    await manager.start(user=other_user, platform="xiaoya")
+                    status = manager.status_for(user_id=other_user.id)
+                finally:
+                    web_app.WEB_DIR = original_web_dir
+                    web_app.load_async_playwright_for_web = original_loader
+            return launch_count_after_reuse, status, contexts, playwrights
+
+        launch_count_after_reuse, status, contexts, playwrights = asyncio.run(run_case())
+        self.assertEqual(launch_count_after_reuse, 1)
+        self.assertEqual(len(playwrights), 2)
+        self.assertTrue(contexts[0].closed)
+        self.assertTrue(playwrights[0].stopped)
+        self.assertEqual(status["platform"], "小雅")
+        self.assertFalse(contexts[1].closed)
+
 
 if __name__ == "__main__":
     unittest.main()
