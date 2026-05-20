@@ -147,6 +147,17 @@ class HomeworkDB:
             return assignments
         return [assignment for assignment in assignments if assignment_is_pending(assignment)]
 
+    def delete_pending_assignments(self) -> int:
+        assignments = self.list_assignments(include_done=True)
+        ids = [assignment.id for assignment in assignments if assignment.id is not None and assignment_is_pending(assignment)]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        self.conn.execute(f"DELETE FROM reminders WHERE assignment_id IN ({placeholders})", ids)
+        cursor = self.conn.execute(f"DELETE FROM assignments WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+        return cursor.rowcount
+
     def mark_done(self, assignment_id: int) -> Assignment:
         timestamp = to_iso(now_local())
         cursor = self.conn.execute(

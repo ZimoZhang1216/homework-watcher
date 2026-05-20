@@ -44,7 +44,7 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.6"
+APP_VERSION = "V-1.7"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
@@ -645,9 +645,11 @@ def normalize_novnc_url(url: str) -> str:
 
 def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) -> str:
     db = HomeworkDB(user_homework_db_path(user.id))
-    created = 0
     seen = 0
+    written = 0
+    removed = 0
     errors: list[str] = []
+    scanned_items = []
     slugs = canonical_slugs()
     emit_job_progress(progress, "准备扫描平台", 5)
     try:
@@ -665,26 +667,28 @@ def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) ->
                 errors.append(f"{adapter.platform_name}: {exc}")
                 emit_job_progress(progress, f"{adapter.platform_name} 扫描失败：{exc}", platform_end)
                 continue
-            emit_job_progress(progress, f"{adapter.platform_name}：写入数据库 {len(items)} 条", platform_end)
-            for item in items:
-                assignment, was_created = db.add_assignment(
-                    title=item.title,
-                    course=item.course,
-                    platform=item.platform,
-                    due_at=item.due_at,
-                    status=item.status,
-                    url=item.url,
-                )
-                if assignment.id is not None and platform_status_is_done(item.status):
-                    assignment = db.mark_done(assignment.id)
-                seen += 1
-                created += 1 if was_created else 0
+            scanned_items.extend(items)
+            seen += len(items)
             emit_job_progress(progress, f"{adapter.platform_name}：完成，识别 {len(items)} 条", platform_end)
+        emit_job_progress(progress, "替换当前待办", 86)
+        removed = db.delete_pending_assignments()
+        for item in scanned_items:
+            assignment, _ = db.add_assignment(
+                title=item.title,
+                course=item.course,
+                platform=item.platform,
+                due_at=item.due_at,
+                status=item.status,
+                url=item.url,
+            )
+            if assignment.id is not None and platform_status_is_done(item.status):
+                assignment = db.mark_done(assignment.id)
+            written += 1
         emit_job_progress(progress, "补齐本周固定作业", 90)
         materialize_recurring_assignments(db, now=now_local(), horizon_days=7)
     finally:
         db.close()
-    message = f"扫描完成：识别 {seen} 条，新增 {created} 条"
+    message = f"扫描完成：识别 {seen} 条，写入 {written} 条，替换旧待办 {removed} 条"
     if errors:
         message += "；部分平台失败：" + "；".join(errors[:2])
     emit_job_progress(progress, message, 100)

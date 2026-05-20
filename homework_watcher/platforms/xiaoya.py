@@ -344,13 +344,13 @@ def parse_xiaoya_task_page(
     deadline: float | None = None,
     max_pages: int = 20,
 ) -> list[PlatformAssignment]:
-    assignments = collect_visible_task_rows(page, course=course, platform=platform)
+    assignments = collect_visible_task_items(page, course=course, platform=platform)
     for _ in range(max_pages):
         if deadline is not None:
             ensure_scan_time_left(deadline, "读取任务列表")
         if not click_next_task_page(page, deadline=deadline):
             break
-        assignments.extend(collect_visible_task_rows(page, course=course, platform=platform))
+        assignments.extend(collect_visible_task_items(page, course=course, platform=platform))
     if assignments:
         return dedupe_assignments(assignments)
 
@@ -359,6 +359,15 @@ def parse_xiaoya_task_page(
         return []
     blocks = [CandidateBlock(text, page.url)]
     return XiaoyaAdapter().parse_candidate_blocks(blocks, fallback_url=page.url, fallback_course=course)
+
+
+def collect_visible_task_items(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+    return dedupe_assignments(
+        [
+            *collect_visible_task_rows(page, course=course, platform=platform),
+            *collect_visible_task_blocks(page, course=course, platform=platform),
+        ]
+    )
 
 
 def collect_visible_task_rows(page, *, course: str, platform: str) -> list[PlatformAssignment]:
@@ -372,6 +381,51 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
             text = compact_text(cells.nth(cell_index).inner_text(timeout=1_000))
             cell_texts.append(text)
         item = parse_xiaoya_row(cell_texts, course=course, platform=platform, url=page.url)
+        if item is None and len(cell_texts) == 1:
+            item = parse_xiaoya_task_block(cell_texts[0], course=course, platform=platform, url=page.url)
+        if item is not None:
+            assignments.append(item)
+    return assignments
+
+
+def collect_visible_task_blocks(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+    try:
+        texts = page.evaluate(
+            """
+            () => {
+              const selectors = [
+                '.ant-card',
+                '.ant-list-item',
+                '[class*="task"]',
+                '[class*="homework"]',
+                '[class*="work"]',
+                '[class*="activity"]'
+              ];
+              const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+              const visible = node => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              return nodes
+                .filter(visible)
+                .map(node => (node.innerText || node.textContent || '').trim())
+                .filter(text => text.length >= 8 && text.length <= 1200)
+                .filter(text => /任务单|作业|任务|提交/.test(text))
+                .filter(text => /截止|到期|结束|Due|deadline|20\\d{2}[-/.年]\\s*\\d{1,2}|\\d{1,2}\\s*月\\s*\\d{1,2}/i.test(text));
+            }
+            """
+        )
+    except Exception:
+        texts = []
+    assignments: list[PlatformAssignment] = []
+    seen_texts: set[str] = set()
+    for raw_text in texts:
+        text = compact_text(str(raw_text))
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
+        item = parse_xiaoya_task_block(text, course=course, platform=platform, url=page.url)
         if item is not None:
             assignments.append(item)
     return assignments
@@ -453,6 +507,75 @@ def parse_xiaoya_row(
         status=status,
         url=url,
     )
+
+
+def parse_xiaoya_task_block(text: str, *, course: str, platform: str, url: str) -> PlatformAssignment | None:
+    text = compact_text(text)
+    if not text or "老师还没有发布任务" in text:
+        return None
+    if not re.search(r"任务单|作业|任务|提交", text):
+        return None
+    due_at = find_xiaoya_due_datetime(text)
+    if due_at is None:
+        return None
+    title = extract_xiaoya_task_title(text, fallback_course=course)
+    if not title:
+        return None
+    return PlatformAssignment(
+        title=title,
+        course=course,
+        platform=platform,
+        due_at=due_at,
+        status=guess_row_status(text.splitlines()),
+        url=url,
+    )
+
+
+def find_xiaoya_due_datetime(text: str):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        if re.search(r"截止|到期|结束|完成时间|deadline|due", line, re.IGNORECASE):
+            match = re.search(r"(?:截止(?:时间|日期)?|到期(?:时间|日期)?|结束(?:时间|日期)?|完成时间|deadline|due)\s*[:：]?\s*(.+)", line, re.IGNORECASE)
+            if match:
+                due_at = find_datetime(match.group(1))
+                if due_at is not None:
+                    return due_at
+            due_at = find_datetime(line)
+            if due_at is not None:
+                return due_at
+    return find_datetime(text)
+
+
+def extract_xiaoya_task_title(text: str, *, fallback_course: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        match = re.search(r"(?:任务单名称|任务名称|作业名称|标题|名称|任务|作业)\s*[:：]\s*(.+)", line)
+        if match:
+            value = clean_xiaoya_task_title(match.group(1), fallback_course=fallback_course)
+            if value:
+                return value
+    preferred = [line for line in lines if "任务单" in line and clean_xiaoya_task_title(line, fallback_course=fallback_course)]
+    preferred.extend(line for line in lines if re.search(r"作业|任务", line) and clean_xiaoya_task_title(line, fallback_course=fallback_course))
+    preferred.extend(lines)
+    for line in preferred:
+        value = clean_xiaoya_task_title(line, fallback_course=fallback_course)
+        if value:
+            return value
+    return ""
+
+
+def clean_xiaoya_task_title(value: str, *, fallback_course: str) -> str:
+    value = compact_text(value).replace("\n", " ")
+    value = re.sub(r"(?:截止|到期|结束|完成时间|deadline|due)\s*[:：]?.*$", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"^(?:课程|课程名称|状态|类型|发布人|发布对象|开始时间|发布时间|截止时间|结束时间)\s*[:：]\s*", "", value).strip()
+    value = re.sub(r"^(?:待完成|未完成|未提交|已完成|已提交|进行中|查看|进入任务)\s*$", "", value).strip()
+    if fallback_course:
+        value = re.sub(rf"^{re.escape(fallback_course)}\s*[:：｜| -]*", "", value).strip()
+    if value in {"任务单", "作业", "任务", "标题", "名称", fallback_course}:
+        return ""
+    if find_datetime(value) is not None:
+        return ""
+    return value
 
 
 def first_nonempty(cells: list[str]) -> str:

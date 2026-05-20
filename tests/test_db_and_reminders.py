@@ -131,6 +131,43 @@ class DBAndReminderTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_delete_pending_assignments_replaces_current_todo_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = HomeworkDB(Path(tmp) / "homework.db")
+            try:
+                pending, _ = db.add_assignment(
+                    title="旧待办",
+                    platform="小雅",
+                    due_at=datetime(2026, 5, 20, 23, 59),
+                    status="未提交",
+                )
+                done, _ = db.add_assignment(
+                    title="已完成",
+                    platform="小雅",
+                    due_at=datetime(2026, 5, 19, 23, 59),
+                    status="已完成",
+                )
+                unavailable, _ = db.add_assignment(
+                    title="未开始",
+                    platform="长江雨课堂",
+                    due_at=datetime(2026, 5, 21, 23, 59),
+                    status="不可完成的作业",
+                )
+                db.mark_reminded(pending.id, "new")
+
+                deleted = db.delete_pending_assignments()
+
+                self.assertEqual(deleted, 1)
+                all_titles = {item.title for item in db.list_assignments(include_done=True)}
+                self.assertNotIn("旧待办", all_titles)
+                self.assertIn("已完成", all_titles)
+                self.assertIn("未开始", all_titles)
+                self.assertFalse(db.reminder_sent(pending.id, "new"))
+                self.assertIsNotNone(done.id)
+                self.assertIsNotNone(unavailable.id)
+            finally:
+                db.close()
+
     def test_due_reminder_uses_most_urgent_pending_threshold(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = HomeworkDB(Path(tmp) / "homework.db")

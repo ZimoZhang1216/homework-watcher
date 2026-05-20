@@ -180,6 +180,67 @@ class WebAppTest(unittest.TestCase):
         self.assertNotIn("已完成旧作业", active_titles)
         self.assertTrue(any(percent == 100 for _, percent in messages))
 
+    def test_web_scan_replaces_current_pending_assignments(self):
+        class FakeAdapter:
+            platform_name = "小雅"
+            slug = "xiaoya"
+
+            def __init__(self, *, profile_root):
+                self.profile_root = profile_root
+
+            def fetch_assignments(self, *, headless=True, progress=None):
+                return [
+                    PlatformAssignment(
+                        title="最新任务单",
+                        course="结构化学",
+                        platform="小雅",
+                        due_at=datetime(2026, 5, 27, 23, 59),
+                        status="未提交",
+                        url="https://example.test/task",
+                    )
+                ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original_web_dir = web_app.WEB_DIR
+            original_slugs = web_app.canonical_slugs
+            original_adapters = web_app.ADAPTER_CLASSES
+            web_app.WEB_DIR = Path(tmp)
+            web_app.canonical_slugs = lambda: ["xiaoya"]
+            web_app.ADAPTER_CLASSES = {"xiaoya": FakeAdapter}
+            try:
+                user = WebUser(
+                    id=1,
+                    email="demo@example.com",
+                    report_email="demo@example.com",
+                    created_at="2026-05-18 08:00:00",
+                )
+                db = HomeworkDB(web_app.user_homework_db_path(user.id))
+                try:
+                    db.add_assignment(
+                        title="旧扫描残留",
+                        course="结构化学",
+                        platform="小雅",
+                        due_at=datetime(2026, 5, 20, 23, 59),
+                        status="未提交",
+                    )
+                finally:
+                    db.close()
+
+                message = web_app.scan_user_homework(user)
+                db = HomeworkDB(web_app.user_homework_db_path(user.id))
+                try:
+                    active_titles = {item.title for item in db.list_assignments()}
+                finally:
+                    db.close()
+            finally:
+                web_app.WEB_DIR = original_web_dir
+                web_app.canonical_slugs = original_slugs
+                web_app.ADAPTER_CLASSES = original_adapters
+
+        self.assertIn("替换旧待办 1 条", message)
+        self.assertIn("最新任务单", active_titles)
+        self.assertNotIn("旧扫描残留", active_titles)
+
     def test_platform_login_manager_uses_async_playwright(self):
         class FakePage:
             def __init__(self):
