@@ -134,6 +134,48 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(task_url_for("https://example.test/mycourse/1/resource/last"), "https://example.test/mycourse/1/task")
         self.assertEqual(task_url_for("https://example.test/mycourse/1/task/last"), "https://example.test/mycourse/1/task")
 
+    def test_parse_xiaoya_task_row_prefers_deadline_header(self):
+        item = parse_xiaoya_row(
+            [
+                "作业-08",
+                "\\",
+                "作业",
+                "进行中",
+                "全体",
+                "全体",
+                "2026-05-06 10:00",
+                "2026-05-28 23:59",
+            ],
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间", "截止时间"],
+        )
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.title, "作业-08")
+        self.assertEqual(item.status, "未提交")
+        self.assertEqual(item.due_at, datetime(2026, 5, 28, 23, 59))
+
+    def test_parse_xiaoya_task_row_ignores_publish_time_without_deadline(self):
+        item = parse_xiaoya_row(
+            [
+                "作业-08",
+                "\\",
+                "作业",
+                "进行中",
+                "全体",
+                "全体",
+                "2026-05-06 10:00",
+            ],
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+            headers=["标题", "位置", "任务类型", "状态", "发布状态", "分配对象", "发布时间"],
+        )
+
+        self.assertIsNone(item)
+
     def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
         class FakePage:
             def evaluate(self, script):

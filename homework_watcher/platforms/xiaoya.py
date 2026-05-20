@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .base import (
     DEFAULT_CANDIDATE_SELECTORS,
@@ -27,6 +27,14 @@ from ..datetime_utils import find_datetime
 class CourseEntry:
     name: str
     page_number: int
+
+
+@dataclass(frozen=True)
+class TaskRowCandidate:
+    headers: list[str]
+    cells: list[str]
+    text: str
+    url: str
 
 
 class XiaoyaAdapter(PlaywrightPlatformAdapter):
@@ -362,30 +370,209 @@ def parse_xiaoya_task_page(
 
 
 def collect_visible_task_items(page, *, course: str, platform: str) -> list[PlatformAssignment]:
-    return dedupe_assignments(
-        [
-            *collect_visible_task_rows(page, course=course, platform=platform),
-            *collect_visible_task_blocks(page, course=course, platform=platform),
-        ]
-    )
+    rows, unresolved = collect_visible_task_rows(page, course=course, platform=platform)
+    detail_items = collect_task_detail_items(page, unresolved, course=course, platform=platform)
+    return dedupe_assignments([*rows, *detail_items, *collect_visible_task_blocks(page, course=course, platform=platform)])
 
 
-def collect_visible_task_rows(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+def collect_visible_task_rows(
+    page,
+    *,
+    course: str,
+    platform: str,
+) -> tuple[list[PlatformAssignment], list[TaskRowCandidate]]:
     assignments: list[PlatformAssignment] = []
-    rows = page.locator("tbody tr")
-    for index in range(min(rows.count(), 200)):
-        row = rows.nth(index)
-        cells = row.locator("td")
-        cell_texts: list[str] = []
-        for cell_index in range(cells.count()):
-            text = compact_text(cells.nth(cell_index).inner_text(timeout=1_000))
-            cell_texts.append(text)
-        item = parse_xiaoya_row(cell_texts, course=course, platform=platform, url=page.url)
-        if item is None and len(cell_texts) == 1:
-            item = parse_xiaoya_task_block(cell_texts[0], course=course, platform=platform, url=page.url)
+    unresolved: list[TaskRowCandidate] = []
+    for candidate in collect_task_row_candidates(page):
+        item = parse_xiaoya_row_candidate(candidate, course=course, platform=platform, fallback_url=page.url)
+        if item is None and len(candidate.cells) == 1:
+            item = parse_xiaoya_task_block(candidate.cells[0], course=course, platform=platform, url=candidate.url or page.url)
         if item is not None:
             assignments.append(item)
+            continue
+        if should_open_task_detail(candidate):
+            unresolved.append(candidate)
+    return assignments, unresolved
+
+
+def collect_task_row_candidates(page) -> list[TaskRowCandidate]:
+    rows: list[TaskRowCandidate] = []
+    seen: set[tuple[str, str]] = set()
+    for scroll_left in (0, 1_000_000):
+        scroll_task_tables(page, scroll_left)
+        for raw in evaluate_task_rows(page):
+            candidate = TaskRowCandidate(
+                headers=[compact_text(str(value)) for value in raw.get("headers", []) if compact_text(str(value))],
+                cells=[compact_text(str(value)) for value in raw.get("cells", []) if compact_text(str(value))],
+                text=compact_text(str(raw.get("text", ""))),
+                url=str(raw.get("url", "") or ""),
+            )
+            if not candidate.cells and not candidate.text:
+                continue
+            key = ("\n".join(candidate.cells) or candidate.text, candidate.url)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(candidate)
+    return rows
+
+
+def scroll_task_tables(page, scroll_left: int) -> None:
+    try:
+        page.evaluate(
+            """
+            scrollLeft => {
+              for (const node of document.querySelectorAll('.ant-table-body, .ant-table-content')) {
+                node.scrollLeft = scrollLeft;
+              }
+            }
+            """,
+            scroll_left,
+        )
+        page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+
+def evaluate_task_rows(page) -> list[dict]:
+    try:
+        return page.evaluate(
+            """
+            () => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const visibleEnough = node => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const tables = Array.from(document.querySelectorAll('.ant-table, table'));
+              const result = [];
+              for (const table of tables) {
+                const root = table.closest('.ant-table') || table;
+                const headers = Array.from(root.querySelectorAll('thead th'))
+                  .map(node => compact(node.innerText || node.textContent))
+                  .filter(Boolean);
+                const rows = Array.from(root.querySelectorAll('tbody tr'))
+                  .filter(row => !row.classList.contains('ant-table-measure-row'));
+                for (const row of rows) {
+                  const cells = Array.from(row.querySelectorAll('td'))
+                    .filter(cell => visibleEnough(cell) || compact(cell.textContent))
+                    .map(cell => compact(cell.innerText || cell.textContent))
+                    .filter(Boolean);
+                  const text = compact(row.innerText || row.textContent);
+                  const link = row.querySelector('a[href]');
+                  const href = link ? link.getAttribute('href') : '';
+                  if (cells.length || text) result.push({ headers, cells, text, url: href || '' });
+                }
+              }
+              return result;
+            }
+            """
+        )
+    except Exception:
+        return []
+
+
+def parse_xiaoya_row_candidate(
+    candidate: TaskRowCandidate,
+    *,
+    course: str,
+    platform: str,
+    fallback_url: str,
+) -> PlatformAssignment | None:
+    item = parse_xiaoya_row(
+        candidate.cells,
+        course=course,
+        platform=platform,
+        url=urljoin(fallback_url, candidate.url) if candidate.url else fallback_url,
+        headers=candidate.headers,
+    )
+    if item is not None:
+        return item
+    if re.search(r"截止|到期|结束|deadline|due", candidate.text, re.IGNORECASE):
+        return parse_xiaoya_task_block(candidate.text, course=course, platform=platform, url=fallback_url)
+    return None
+
+
+def should_open_task_detail(candidate: TaskRowCandidate) -> bool:
+    text = "\n".join([*candidate.cells, candidate.text])
+    if not candidate.url or candidate.url.startswith(("javascript:", "#")):
+        return False
+    if not re.search(r"作业|任务|实习|练习|测验|问卷", text):
+        return False
+    if re.search(r"已完成|已提交|已批改", text) and not re.search(r"进行中|未完成|未提交|待完成", text):
+        return False
+    return True
+
+
+def collect_task_detail_items(
+    page,
+    candidates: list[TaskRowCandidate],
+    *,
+    course: str,
+    platform: str,
+) -> list[PlatformAssignment]:
+    assignments: list[PlatformAssignment] = []
+    seen_urls: set[str] = set()
+    for candidate in candidates[:40]:
+        target_url = urljoin(page.url, candidate.url)
+        if target_url in seen_urls:
+            continue
+        seen_urls.add(target_url)
+        detail_page = page.context.new_page()
+        try:
+            detail_page.goto(target_url, wait_until="domcontentloaded", timeout=12_000)
+            wait_for_detail_page(detail_page)
+            text = safe_body_text(detail_page)
+            item = parse_xiaoya_task_block(text, course=course, platform=platform, url=detail_page.url)
+            if item is None:
+                due_at = find_xiaoya_due_datetime(text)
+                title = first_task_title_from_candidate(candidate)
+                if due_at is not None and title:
+                    item = PlatformAssignment(
+                        title=title,
+                        course=course,
+                        platform=platform,
+                        due_at=due_at,
+                        status=guess_row_status([*candidate.cells, text]),
+                        url=detail_page.url,
+                    )
+            if item is not None:
+                assignments.append(item)
+        except Exception:
+            continue
+        finally:
+            try:
+                detail_page.close()
+            except Exception:
+                pass
     return assignments
+
+
+def wait_for_detail_page(page) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=6_000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
+
+
+def first_task_title_from_candidate(candidate: TaskRowCandidate) -> str:
+    headers = candidate.headers
+    cells = candidate.cells
+    for index, header in enumerate(headers):
+        if index < len(cells) and re.search(r"标题|名称|任务|作业", header):
+            title = clean_xiaoya_task_title(cells[index], fallback_course="")
+            if title:
+                return title
+    for cell in cells:
+        title = clean_xiaoya_task_title(cell, fallback_course="")
+        if title and find_datetime(title) is None and not looks_like_metadata_cell(title):
+            return title
+    return ""
 
 
 def collect_visible_task_blocks(page, *, course: str, platform: str) -> list[PlatformAssignment]:
@@ -412,7 +599,7 @@ def collect_visible_task_blocks(page, *, course: str, platform: str) -> list[Pla
                 .map(node => (node.innerText || node.textContent || '').trim())
                 .filter(text => text.length >= 8 && text.length <= 1200)
                 .filter(text => /任务单|作业|任务|提交/.test(text))
-                .filter(text => /截止|到期|结束|Due|deadline|20\\d{2}[-/.年]\\s*\\d{1,2}|\\d{1,2}\\s*月\\s*\\d{1,2}/i.test(text));
+                .filter(text => /截止|到期|结束|Due|deadline/i.test(text));
             }
             """
         )
@@ -487,15 +674,15 @@ def parse_xiaoya_row(
     course: str,
     platform: str,
     url: str,
+    headers: list[str] | None = None,
 ) -> PlatformAssignment | None:
     if len(cells) < 4:
         return None
     joined = "\n".join(cells)
-    due_source = cells[8] if len(cells) > 8 and cells[8].strip() else joined
-    due_at = find_datetime(due_source)
+    due_at = find_due_at_from_row(cells, headers or [])
     if due_at is None:
         return None
-    title = first_nonempty(cells)
+    title = title_from_row(cells, headers or [])
     if not title or title in {"标题", "老师还没有发布任务，敬请期待吧！"}:
         return None
     status = guess_row_status(cells)
@@ -507,6 +694,37 @@ def parse_xiaoya_row(
         status=status,
         url=url,
     )
+
+
+def find_due_at_from_row(cells: list[str], headers: list[str]):
+    for index, header in enumerate(headers):
+        if index >= len(cells):
+            continue
+        if re.search(r"截止|到期|结束|deadline|due", header, re.IGNORECASE):
+            due_at = find_datetime(cells[index])
+            if due_at is not None:
+                return due_at
+    for cell in cells:
+        if re.search(r"截止|到期|结束|deadline|due", cell, re.IGNORECASE):
+            due_at = find_xiaoya_due_datetime(cell)
+            if due_at is not None:
+                return due_at
+    if len(cells) > 8 and cells[8].strip():
+        return find_datetime(cells[8])
+    return None
+
+
+def title_from_row(cells: list[str], headers: list[str]) -> str:
+    for index, header in enumerate(headers):
+        if index < len(cells) and re.search(r"标题|名称|任务|作业", header):
+            title = clean_xiaoya_task_title(cells[index], fallback_course="")
+            if title:
+                return title
+    for cell in cells:
+        title = clean_xiaoya_task_title(cell, fallback_course="")
+        if title and not looks_like_metadata_cell(title):
+            return title
+    return first_nonempty(cells)
 
 
 def parse_xiaoya_task_block(text: str, *, course: str, platform: str, url: str) -> PlatformAssignment | None:
@@ -578,6 +796,14 @@ def clean_xiaoya_task_title(value: str, *, fallback_course: str) -> str:
     return value
 
 
+def looks_like_metadata_cell(value: str) -> bool:
+    return bool(
+        re.fullmatch(r"[\\/｜| -]+", value)
+        or re.fullmatch(r"全体|个人|小组|作业|任务|测验|问卷|讨论|自主观看|课堂练习", value)
+        or re.search(r"已完成|已提交|已批改|未开始|未开放|进行中|未提交|待完成", value)
+    )
+
+
 def first_nonempty(cells: list[str]) -> str:
     for cell in cells:
         if cell.strip():
@@ -589,7 +815,7 @@ def guess_row_status(cells: list[str]) -> str:
     joined = " ".join(cells)
     if "未开始" in joined or "未开放" in joined or "未到开始时间" in joined:
         return "不可完成的作业"
-    if "未提交" in joined or "待完成" in joined or "未完成" in joined:
+    if "未提交" in joined or "待完成" in joined or "未完成" in joined or "进行中" in joined:
         return "未提交"
     if "已提交" in joined or "已完成" in joined or "已批改" in joined:
         return "已提交"
