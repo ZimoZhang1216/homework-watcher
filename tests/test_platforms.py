@@ -8,7 +8,13 @@ from pathlib import Path
 from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapters
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
-from homework_watcher.platforms.xiaoya import collect_current_page_course_names, parse_xiaoya_row, task_url_for
+from homework_watcher.platforms.xiaoya import (
+    collect_current_page_course_names,
+    collect_visible_task_rows,
+    derived_pending_task_urls,
+    parse_xiaoya_row,
+    task_url_for,
+)
 
 
 class PlatformAdapterTests(unittest.TestCase):
@@ -138,6 +144,35 @@ class PlatformAdapterTests(unittest.TestCase):
             collect_current_page_course_names(FakePage()),
             ["结构化学", "大学物理学基础 II"],
         )
+
+    def test_xiaoya_pending_task_rows_can_infer_course(self):
+        class FakePage:
+            url = "https://example.test/todo"
+
+            def evaluate(self, script):
+                return [
+                    [
+                        "结构化学",
+                        "第 7 次作业",
+                        "作业",
+                        "待完成",
+                        "2026-05-20 08:00",
+                        "2026-05-26 23:59",
+                    ]
+                ]
+
+        items = collect_visible_task_rows(FakePage(), course="", platform="小雅")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].course, "结构化学")
+        self.assertEqual(items[0].title, "第 7 次作业")
+        self.assertEqual(items[0].status, "未提交")
+
+    def test_xiaoya_pending_task_urls_are_derived_from_mycourse(self):
+        urls = derived_pending_task_urls("https://nankai.ai-augmented.com/app/jx-web/mycourse")
+
+        self.assertIn("https://nankai.ai-augmented.com/app/jx-web/todo", urls)
+        self.assertIn("https://nankai.ai-augmented.com/app/jx-web/task", urls)
 
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(

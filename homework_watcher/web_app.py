@@ -44,11 +44,12 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-01.02"
+APP_VERSION = "V-1.3"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
+WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "240"))
 JobProgress = Callable[[str, int | None], None]
 
 
@@ -189,7 +190,7 @@ class WebStore:
         progress = 100 if status == "success" else 0
         with self.lock:
             self.conn.execute(
-                "UPDATE jobs SET status = ?, message = ?, progress = ?, updated_at = ? WHERE id = ?",
+                "UPDATE jobs SET status = ?, message = ?, progress = ?, updated_at = ? WHERE id = ? AND status = 'running'",
                 (status, message, progress, timestamp_now(), job_id),
             )
             self.conn.commit()
@@ -199,12 +200,12 @@ class WebStore:
         with self.lock:
             if normalized is None:
                 self.conn.execute(
-                    "UPDATE jobs SET message = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE jobs SET message = ?, updated_at = ? WHERE id = ? AND status = 'running'",
                     (message, timestamp_now(), job_id),
                 )
             else:
                 self.conn.execute(
-                    "UPDATE jobs SET message = ?, progress = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE jobs SET message = ?, progress = ?, updated_at = ? WHERE id = ? AND status = 'running'",
                     (message, normalized, timestamp_now(), job_id),
                 )
             self.conn.commit()
@@ -217,12 +218,38 @@ class WebStore:
         return row_to_job(row)
 
     def recent_jobs(self, *, user_id: int, limit: int = 8) -> list[WebJob]:
+        self.expire_stale_jobs(user_id=user_id)
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM jobs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
         return [row_to_job(row) for row in rows]
+
+    def running_job(self, *, user_id: int, kind: str) -> WebJob | None:
+        self.expire_stale_jobs(user_id=user_id)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM jobs WHERE user_id = ? AND kind = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+                (user_id, kind),
+            ).fetchone()
+        return row_to_job(row) if row is not None else None
+
+    def expire_stale_jobs(self, *, user_id: int, max_age_seconds: int = WEB_JOB_TIMEOUT_SECONDS) -> None:
+        cutoff = (datetime.now() - timedelta(seconds=max_age_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed',
+                    message = '任务超时，已停止等待。请重新运行。',
+                    progress = 0,
+                    updated_at = ?
+                WHERE user_id = ? AND status = 'running' AND updated_at < ?
+                """,
+                (timestamp_now(), user_id, cutoff),
+            )
+            self.conn.commit()
 
 
 class LoginSessionManager:
@@ -687,9 +714,12 @@ def daily_user_run(user: WebUser, *, progress: JobProgress | None = None) -> str
 
 
 def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Callable[[JobProgress], str]) -> WebJob:
+    running = store.running_job(user_id=user.id, kind=kind)
+    if running is not None:
+        return running
     job = store.create_job(user_id=user.id, kind=kind)
 
-    def runner() -> None:
+    def worker() -> None:
         def report_progress(message: str, percent: int | None = None) -> None:
             store.update_job_progress(job_id=job.id, message=message, progress=percent)
 
@@ -701,7 +731,18 @@ def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Cal
         else:
             store.finish_job(job_id=job.id, status="success", message=message)
 
-    threading.Thread(target=runner, daemon=True).start()
+    def supervisor() -> None:
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+        worker_thread.join(WEB_JOB_TIMEOUT_SECONDS)
+        if worker_thread.is_alive():
+            store.finish_job(
+                job_id=job.id,
+                status="failed",
+                message=f"任务超过 {WEB_JOB_TIMEOUT_SECONDS} 秒仍未结束，已停止等待。请稍后重试。",
+            )
+
+    threading.Thread(target=supervisor, daemon=True).start()
     return job
 
 

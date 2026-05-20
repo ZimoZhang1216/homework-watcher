@@ -74,6 +74,23 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(updated_job.message, "扫描小雅")
         self.assertEqual(updated_job.progress, 45)
 
+    def test_web_store_expires_stale_running_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebStore(Path(tmp) / "web.db")
+            user = store.create_user(
+                email="demo@example.com",
+                report_email="demo@example.com",
+                password="long-enough-password",
+            )
+            job = store.create_job(user_id=user.id, kind="scan")
+            store.conn.execute("UPDATE jobs SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", (job.id,))
+            store.conn.commit()
+            store.expire_stale_jobs(user_id=user.id, max_age_seconds=1)
+            expired = store.get_job(job.id)
+
+        self.assertEqual(expired.status, "failed")
+        self.assertIn("任务超时", expired.message)
+
     def test_recurring_assignments_can_be_marked_done_from_dashboard(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_web_dir = web_app.WEB_DIR

@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .base import (
     DEFAULT_CANDIDATE_SELECTORS,
@@ -36,7 +36,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         "HW_XIAOYA_URL",
         "https://nankai.ai-augmented.com/app/jx-web/mycourse",
     )
-    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "180"))
+    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "120"))
     max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
     max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "80"))
     candidate_selectors = [
@@ -77,6 +77,18 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
                     )
 
+                pending_assignments = fetch_pending_task_assignments(
+                    page,
+                    platform=self.platform_name,
+                    progress=progress,
+                    deadline=deadline,
+                    start_url=self.url,
+                )
+                if pending_assignments:
+                    pending_assignments = dedupe_assignments(pending_assignments)
+                    emit_progress(progress, f"{self.platform_name}：待完成任务页识别 {len(pending_assignments)} 条任务")
+                    return pending_assignments
+
                 course_entries = collect_course_entries(
                     page,
                     progress=progress,
@@ -114,6 +126,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                             page,
                             course=course_name,
                             platform=self.platform_name,
+                            deadline=deadline,
                         )
                     except PlaywrightUnavailableError:
                         raise
@@ -195,6 +208,129 @@ def ensure_student_course_tab(page) -> None:
             """
         )
         page.wait_for_timeout(800)
+    except Exception:
+        pass
+
+
+def fetch_pending_task_assignments(
+    page,
+    *,
+    platform: str,
+    progress: ProgressCallback,
+    deadline: float,
+    start_url: str,
+) -> list[PlatformAssignment]:
+    emit_progress(progress, f"{platform}：尝试待完成任务页")
+    original_url = page.url
+    for attempt, target in enumerate(pending_task_targets(page, start_url), start=1):
+        ensure_scan_time_left(deadline, "打开待完成任务页")
+        try:
+            if target == "__click__":
+                if not click_pending_task_entry(page):
+                    continue
+            else:
+                page.goto(target, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 12_000))
+            wait_for_pending_task_page(page)
+            assignments = parse_xiaoya_task_page(
+                page,
+                course="",
+                platform=platform,
+                deadline=deadline,
+                max_pages=8,
+            )
+        except PlaywrightUnavailableError:
+            raise
+        except Exception as exc:
+            emit_progress(progress, f"{platform}：待完成入口 {attempt} 未可用：{truncate(str(exc), 36)}")
+            continue
+        if assignments:
+            return assignments
+        emit_progress(progress, f"{platform}：待完成入口 {attempt} 暂无可识别任务")
+        try:
+            page.goto(original_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 8_000))
+        except Exception:
+            pass
+    return []
+
+
+def pending_task_targets(page, start_url: str) -> list[str]:
+    targets = ["__click__"]
+    try:
+        hrefs = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('a[href], [data-url], [data-href]'))
+              .map(node => ({
+                text: (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim(),
+                href: node.getAttribute('href') || node.getAttribute('data-url') || node.getAttribute('data-href') || ''
+              }))
+              .filter(item => /待完成|待办|待处理|我的任务|任务中心/.test(item.text)
+                || /todo|pending|task|homework|mission/i.test(item.href))
+              .map(item => item.href)
+            """
+        )
+    except Exception:
+        hrefs = []
+    for href in hrefs:
+        target = urljoin(page.url or start_url, str(href))
+        if target not in targets:
+            targets.append(target)
+    for target in derived_pending_task_urls(start_url):
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def derived_pending_task_urls(start_url: str) -> list[str]:
+    parsed = urlsplit(start_url)
+    paths = []
+    if "/mycourse" in parsed.path:
+        base = parsed.path.split("/mycourse", 1)[0]
+        paths.extend(
+            [
+                f"{base}/todo",
+                f"{base}/task",
+                f"{base}/mytask",
+                f"{base}/pending",
+                f"{base}/homework",
+                f"{base}/mission",
+            ]
+        )
+    return [urlunsplit((parsed.scheme, parsed.netloc, path, "", "")) for path in paths]
+
+
+def click_pending_task_entry(page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                () => {
+                  const re = /待完成|待办|待处理|我的任务|任务中心/;
+                  const nodes = Array.from(document.querySelectorAll(
+                    'a, button, [role="button"], .ant-menu-item, .ant-tabs-tab, .ant-tabs-tab-btn, [class*="task"], [class*="todo"]'
+                  ));
+                  const target = nodes.find(node => re.test((node.innerText || node.textContent || '').trim()));
+                  if (!target) return false;
+                  target.click();
+                  return true;
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def wait_for_pending_task_page(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=4_000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=6_000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(900)
     except Exception:
         pass
 
@@ -335,10 +471,19 @@ def task_url_for(url: str) -> str:
     return url.rstrip("/") + "/task"
 
 
-def parse_xiaoya_task_page(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+def parse_xiaoya_task_page(
+    page,
+    *,
+    course: str,
+    platform: str,
+    deadline: float | None = None,
+    max_pages: int = 20,
+) -> list[PlatformAssignment]:
     assignments = collect_visible_task_rows(page, course=course, platform=platform)
-    for _ in range(20):
-        if not click_next_task_page(page):
+    for _ in range(max_pages):
+        if deadline is not None:
+            ensure_scan_time_left(deadline, "读取任务列表")
+        if not click_next_task_page(page, deadline=deadline):
             break
         assignments.extend(collect_visible_task_rows(page, course=course, platform=platform))
     if assignments:
@@ -352,14 +497,36 @@ def parse_xiaoya_task_page(page, *, course: str, platform: str) -> list[Platform
 
 
 def collect_visible_task_rows(page, *, course: str, platform: str) -> list[PlatformAssignment]:
-    rows = page.locator("tbody tr")
+    try:
+        row_texts = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('tbody tr, .ant-list-item, [class*="task"][class*="item"]'))
+              .slice(0, 240)
+              .map(row => Array.from(row.querySelectorAll('td, .ant-list-item-meta-title, .ant-list-item-meta-description, [class*="cell"]'))
+                .map(cell => (cell.innerText || cell.textContent || '').replace(/\\s+/g, ' ').trim())
+                .filter(Boolean)
+              )
+              .filter(cells => cells.length)
+            """
+        )
+    except Exception:
+        row_texts = []
     assignments: list[PlatformAssignment] = []
+    for raw_cells in row_texts:
+        cells = [compact_text(str(cell)) for cell in raw_cells if str(cell).strip()]
+        item = parse_xiaoya_row(cells, course=course, platform=platform, url=page.url)
+        if item is not None:
+            assignments.append(item)
+    if assignments:
+        return assignments
+
+    rows = page.locator("tbody tr")
     for index in range(min(rows.count(), 200)):
         row = rows.nth(index)
         cells = row.locator("td")
         cell_texts: list[str] = []
         for cell_index in range(cells.count()):
-            text = compact_text(cells.nth(cell_index).inner_text(timeout=1_000))
+            text = compact_text(cells.nth(cell_index).inner_text(timeout=500))
             cell_texts.append(text)
         item = parse_xiaoya_row(cell_texts, course=course, platform=platform, url=page.url)
         if item is not None:
@@ -367,13 +534,16 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
     return assignments
 
 
-def click_next_task_page(page) -> bool:
+def click_next_task_page(page, *, deadline: float | None = None) -> bool:
+    if deadline is not None:
+        ensure_scan_time_left(deadline, "任务列表翻页")
     next_button = page.locator(".ant-pagination-next:not(.ant-pagination-disabled)").first
     if next_button.count() == 0:
         return False
     before = visible_row_signature(page)
     try:
-        next_button.click(timeout=3_000)
+        timeout = 3_000 if deadline is None else remaining_timeout_ms(deadline, 3_000)
+        next_button.click(timeout=timeout)
     except Exception:
         return False
     wait_for_task_page_update(page, before)
@@ -428,18 +598,51 @@ def parse_xiaoya_row(
     due_at = find_datetime(due_source)
     if due_at is None:
         return None
-    title = first_nonempty(cells)
+    row_course, title = infer_course_and_title(cells, fallback_course=course)
     if not title or title in {"标题", "老师还没有发布任务，敬请期待吧！"}:
         return None
     status = guess_row_status(cells)
     return PlatformAssignment(
         title=title,
-        course=course,
+        course=row_course,
         platform=platform,
         due_at=due_at,
         status=status,
         url=url,
     )
+
+
+def infer_course_and_title(cells: list[str], *, fallback_course: str) -> tuple[str, str]:
+    values = [cell.strip() for cell in cells if cell.strip()]
+    if fallback_course:
+        return fallback_course, first_task_title(values)
+    due_index = next((index for index, cell in enumerate(values) if find_datetime(cell) is not None), len(values))
+    candidates = [
+        value
+        for value in values[:due_index]
+        if not looks_like_status(value)
+        and not looks_like_task_type(value)
+        and find_datetime(value) is None
+    ]
+    if len(candidates) >= 2:
+        return candidates[0], candidates[1]
+    return "", first_task_title(values)
+
+
+def first_task_title(cells: list[str]) -> str:
+    for cell in cells:
+        if looks_like_status(cell) or looks_like_task_type(cell) or find_datetime(cell) is not None:
+            continue
+        return cell.strip()
+    return first_nonempty(cells)
+
+
+def looks_like_status(value: str) -> bool:
+    return any(marker in value for marker in ["未提交", "待完成", "未完成", "已提交", "已完成", "已批改", "未开始", "未开放"])
+
+
+def looks_like_task_type(value: str) -> bool:
+    return value.strip() in {"作业", "任务", "考试", "测验", "测试", "问卷", "讨论", "资料"}
 
 
 def first_nonempty(cells: list[str]) -> str:
