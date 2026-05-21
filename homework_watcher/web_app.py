@@ -47,7 +47,7 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.19"
+APP_VERSION = "V-1.20"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000

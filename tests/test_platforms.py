@@ -7,12 +7,15 @@ from pathlib import Path
 
 from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapters
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
-from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
+from homework_watcher.platforms.base import CandidateBlock, PlaywrightUnavailableError, looks_like_empty_state
 from homework_watcher.platforms.xiaoya import (
+    CourseEntry,
     XiaoyaAdapter,
     collect_current_page_course_names,
+    normalize_course_task_url,
     parse_xiaoya_task_text,
     parse_xiaoya_row,
+    scan_course_tasks,
     task_url_for,
     xiaoya_text_is_loading,
 )
@@ -225,6 +228,47 @@ class PlatformAdapterTests(unittest.TestCase):
             collect_current_page_course_names(FakePage()),
             ["结构化学", "大学物理学基础 II"],
         )
+
+    def test_xiaoya_course_task_url_can_be_derived_from_card_id(self):
+        self.assertEqual(
+            normalize_course_task_url(
+                "",
+                html='<div class="aia_course_card" data-course-id="6902426124991620398">结构化学</div>',
+                base_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+            ),
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+        self.assertEqual(
+            normalize_course_task_url(
+                "",
+                html='{"courseId":"6902426124991620398","courseName":"结构化学"}',
+                base_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+            ),
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+
+    def test_xiaoya_scan_skips_course_without_task_url_instead_of_returning_to_list(self):
+        class FakePage:
+            def __init__(self):
+                self.goto_calls = []
+
+            def goto(self, *args, **kwargs):
+                self.goto_calls.append((args, kwargs))
+
+        page = FakePage()
+        with self.assertRaises(PlaywrightUnavailableError) as ctx:
+            scan_course_tasks(
+                page,
+                course=CourseEntry(name="LPOC", page_number=1, task_url=""),
+                start_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+                platform="小雅",
+                deadline=10**12,
+                max_pages=1,
+                progress=None,
+            )
+
+        self.assertIn("未能定位课程任务页 URL", str(ctx.exception))
+        self.assertEqual(page.goto_calls, [])
 
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(

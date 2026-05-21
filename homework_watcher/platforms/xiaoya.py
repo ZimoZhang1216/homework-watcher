@@ -31,6 +31,11 @@ LOADING_TEXT_RE = re.compile(r"正在加载应用|加载应用|请稍候|loading
 TASK_WORD_RE = re.compile(r"作业|任务|实习|练习|测验|问卷|讨论|提交")
 STATUS_RE = re.compile(r"进行中|未提交|待完成|未完成|已完成|已提交|已批改|未开始|未开放|未到开始时间")
 COURSE_PATH_RE = re.compile(r"(/app/jx-web/mycourse/[^\"'<\s]+|/mycourse/[^\"'<\s]+)")
+COURSE_ID_RE = re.compile(
+    r"(?:courseId|course_id|courseid|classroomId|classroom_id|clazzId|classId|courseCode|resourceId|id)"
+    r"[\"'\s:=_-]+([1-9]\d{10,})",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -337,7 +342,16 @@ def collect_course_entries(
     for _ in range(max_pages):
         if deadline is not None:
             ensure_scan_time_left(deadline, "读取课程列表")
-        for entry in collect_current_page_course_entries(page, page_number=page_number):
+        page_entries = collect_current_page_course_entries(page, page_number=page_number)
+        page_entries = resolve_missing_course_task_urls(
+            page,
+            page_entries,
+            page_number=page_number,
+            deadline=deadline,
+            progress=progress,
+            platform_name=platform_name,
+        )
+        for entry in page_entries:
             key = entry.name.casefold()
             if not entry.name or key in seen:
                 continue
@@ -368,7 +382,13 @@ def collect_current_page_course_entries(page, *, page_number: int) -> list[Cours
             name = extract_course_name(str(raw.get("name") or raw.get("text") or ""))
             task_url = normalize_course_task_url(
                 str(raw.get("url") or ""),
-                html=str(raw.get("html") or ""),
+                html="\n".join(
+                    [
+                        str(raw.get("html") or ""),
+                        str(raw.get("attributes") or ""),
+                        str(raw.get("dataset") or ""),
+                    ]
+                ),
                 base_url=page.url,
             )
         else:
@@ -391,10 +411,15 @@ def evaluate_course_cards(page) -> list[dict] | list[str]:
                 const url = (link && link.getAttribute('href'))
                   || attrs.map(name => card.getAttribute(name)).find(Boolean)
                   || '';
+                const nodes = [card, ...Array.from(card.querySelectorAll('*')).slice(0, 80)];
+                const attributes = nodes.flatMap(node => Array.from(node.attributes || [])
+                  .map(attr => `${attr.name}=${attr.value}`)).join('\\n');
                 return {
                   name: card.getAttribute('data-xy-click-pt-name') || '',
                   text: compact(card.innerText || card.textContent || ''),
                   url,
+                  attributes,
+                  dataset: JSON.stringify(card.dataset || {}),
                   html: card.outerHTML || '',
                 };
               })
@@ -414,7 +439,101 @@ def normalize_course_task_url(raw_url: str, *, html: str, base_url: str) -> str:
         if "/mycourse/" not in value:
             continue
         return task_url_for(urljoin(base_url, value))
+    course_id = find_course_id(html)
+    if course_id:
+        base = urlsplit(base_url)
+        return urlunsplit((base.scheme, base.netloc, f"/app/jx-web/mycourse/{course_id}/task", "", ""))
     return ""
+
+
+def find_course_id(text: str) -> str:
+    for match in COURSE_ID_RE.finditer(text):
+        return match.group(1)
+    for match in re.finditer(r"\b([1-9]\d{14,})\b", text):
+        return match.group(1)
+    return ""
+
+
+def resolve_missing_course_task_urls(
+    page,
+    entries: list[CourseEntry],
+    *,
+    page_number: int,
+    deadline: float | None,
+    progress: ProgressCallback,
+    platform_name: str,
+) -> list[CourseEntry]:
+    if not entries or all(entry.task_url for entry in entries):
+        return entries
+    resolved: list[CourseEntry] = []
+    for entry in entries:
+        if entry.task_url:
+            resolved.append(entry)
+            continue
+        task_url = capture_course_task_url(page, entry.name, deadline=deadline)
+        if task_url:
+            resolved.append(CourseEntry(name=entry.name, page_number=entry.page_number, task_url=task_url))
+            emit_progress(progress, f"{platform_name}：已定位课程任务页 {entry.name}")
+        else:
+            resolved.append(entry)
+        ensure_course_list_page(page, page_number=page_number, deadline=deadline)
+    return resolved
+
+
+def capture_course_task_url(page, course_name: str, *, deadline: float | None) -> str:
+    if deadline is not None:
+        ensure_scan_time_left(deadline, f"定位课程任务页 {course_name}")
+    before_url = page.url
+    try:
+        clicked = page.evaluate(
+            """
+            name => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const cards = Array.from(document.querySelectorAll('.aia_course_card'));
+              const card = cards.find(node => compact(node.innerText || node.textContent).includes(name));
+              if (!card) return false;
+              card.click();
+              return true;
+            }
+            """,
+            course_name,
+        )
+    except Exception:
+        clicked = False
+    if not clicked:
+        return ""
+    try:
+        timeout = remaining_timeout_ms(deadline, 5_000) if deadline is not None else 5_000
+        page.wait_for_function(
+            """previous => location.href !== previous && /\\/mycourse\\/[^/]+/.test(location.pathname)""",
+            before_url,
+            timeout=timeout,
+        )
+    except Exception:
+        return ""
+    if "/mycourse/" not in page.url:
+        return ""
+    return task_url_for(page.url)
+
+
+def ensure_course_list_page(page, *, page_number: int, deadline: float | None) -> None:
+    if page.locator(".aia_course_card").count() == 0:
+        try:
+            timeout = remaining_timeout_ms(deadline, 5_000) if deadline is not None else 5_000
+            page.go_back(wait_until="domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+    wait_for_xiaoya_shell(page, timeout_ms=4_000, settle_ms=300)
+    if page.locator(".aia_course_card").count() == 0:
+        try:
+            timeout = remaining_timeout_ms(deadline, 8_000) if deadline is not None else 8_000
+            page.goto(XiaoyaAdapter.start_url, wait_until="domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+        wait_for_xiaoya_shell(page, timeout_ms=5_000, settle_ms=300)
+        ensure_student_course_tab(page)
+        wait_for_xiaoya_shell(page, timeout_ms=4_000, settle_ms=300)
+    go_to_course_page(page, page_number, deadline=deadline)
 
 
 def extract_course_name(text: str) -> str:
@@ -484,15 +603,7 @@ def scan_course_tasks(
         emit_progress(progress, f"{platform}：进入任务页 {course.name}")
         page.goto(target_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 15_000))
     else:
-        open_xiaoya_page(page, start_url, deadline=deadline, progress=progress, label="回到课程列表")
-        go_to_course_page(page, course.page_number, deadline=deadline)
-        card = page.locator(".aia_course_card").filter(has_text=course.name).first
-        if card.count() == 0:
-            raise PlaywrightUnavailableError("未找到课程卡片")
-        card.click(timeout=remaining_timeout_ms(deadline, 6_000))
-        wait_for_xiaoya_shell(page, timeout_ms=6_000, settle_ms=600)
-        target_url = task_url_for(page.url)
-        page.goto(target_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 15_000))
+        raise PlaywrightUnavailableError("未能定位课程任务页 URL，已跳过以避免卡住")
     wait_for_xiaoya_shell(page, timeout_ms=8_000, settle_ms=700)
     recover_xiaoya_loading_page(page, deadline=deadline, progress=progress)
     return parse_xiaoya_task_page(
