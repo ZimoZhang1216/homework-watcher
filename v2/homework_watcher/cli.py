@@ -4,6 +4,7 @@ import argparse
 import json
 
 from .app import app
+from .database import assignment_to_dict, create_session_factory, init_db, list_assignments
 from .git_utils import git_commit
 from .settings import load_settings
 
@@ -14,6 +15,9 @@ def main(argv: list[str] | None = None) -> int:
 
     health_parser = subparsers.add_parser("health", help="输出服务健康信息")
     health_parser.set_defaults(handler=cmd_health)
+
+    db_list_parser = subparsers.add_parser("db-list", help="输出 assignments 表记录")
+    db_list_parser.set_defaults(handler=cmd_db_list)
 
     args = parser.parse_args(argv)
     if not hasattr(args, "handler"):
@@ -37,6 +41,16 @@ def cmd_health(_args) -> int:
             indent=2,
         )
     )
+    return 0
+
+
+def cmd_db_list(_args) -> int:
+    settings = load_settings()
+    init_db(settings)
+    session_factory = create_session_factory(settings)
+    with session_factory() as session:
+        items = [assignment_to_dict(item) for item in list_assignments(session)]
+    print(json.dumps(items, ensure_ascii=False, indent=2))
     return 0
 
 
