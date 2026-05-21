@@ -5,7 +5,9 @@ import hmac
 import os
 import re
 import secrets
+import signal
 import sqlite3
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -45,13 +47,14 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.18"
+APP_VERSION = "V-1.19"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
 LOGIN_SESSION_START_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_LOGIN_START_TIMEOUT_SECONDS", "60"))
 WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "900"))
+CHROMIUM_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 JobProgress = Callable[[str, int | None], None]
 
 
@@ -298,6 +301,8 @@ class LoginSessionManager:
                 "user_id": user.id,
                 "email": user.email,
                 "platform": adapter.platform_name,
+                "slug": adapter.slug,
+                "user_data_dir": str(adapter.user_data_dir),
                 "started_at": timestamp_now(),
                 "started_monotonic": time.monotonic(),
             }
@@ -306,6 +311,7 @@ class LoginSessionManager:
         context = None
         started = False
         try:
+            cleanup_browser_profile_dirs([adapter.user_data_dir])
             playwright = await async_playwright().start()
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(adapter.user_data_dir),
@@ -323,6 +329,7 @@ class LoginSessionManager:
                     "email": user.email,
                     "platform": adapter.platform_name,
                     "slug": adapter.slug,
+                    "user_data_dir": str(adapter.user_data_dir),
                     "started_at": timestamp_now(),
                     "started_monotonic": time.monotonic(),
                     "playwright": playwright,
@@ -358,12 +365,18 @@ class LoginSessionManager:
             active = self._pop_active_locked()
         await self._close_active(active)
 
-    async def force_release(self) -> None:
+    async def force_release(self, *, user_id: int | None = None) -> None:
+        profile_dirs: list[Path] = []
         with self.lock:
+            profile_dirs.extend(session_profile_dirs(self.starting))
             self.starting = None
             active = self._pop_active_locked() if self.active is not None else None
+            profile_dirs.extend(session_profile_dirs(active))
+        if user_id is not None:
+            profile_dirs.extend(user_browser_profile_root(user_id) / slug for slug in canonical_slugs())
         if active is not None:
             await self._close_active(active)
+        cleanup_browser_profile_dirs(profile_dirs)
 
     async def close_expired(self) -> None:
         with self.lock:
@@ -511,8 +524,8 @@ def create_app():
 
     @app.post("/remote-login/force-release")
     async def force_release_remote_login(request: Request):
-        require_user(request, store)
-        await login_manager.force_release()
+        user = require_user(request, store)
+        await login_manager.force_release(user_id=user.id)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/assignments/{assignment_id}/done")
@@ -1183,6 +1196,115 @@ def user_browser_profile_root(user_id: int) -> Path:
     path = user_root(user_id) / "browser-profiles"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def session_profile_dirs(session: dict | None) -> list[Path]:
+    if not session:
+        return []
+    user_data_dir = session.get("user_data_dir")
+    if not user_data_dir:
+        return []
+    return [Path(str(user_data_dir)).expanduser()]
+
+
+def cleanup_browser_profile_dirs(profile_dirs) -> int:
+    cleaned_processes = 0
+    seen: set[str] = set()
+    for raw_profile_dir in profile_dirs:
+        profile_dir = Path(raw_profile_dir).expanduser()
+        key = str(profile_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned_processes += kill_browser_profile_processes(profile_dir)
+        remove_chromium_profile_locks(profile_dir)
+    return cleaned_processes
+
+
+def kill_browser_profile_processes(profile_dir: Path, *, wait_seconds: float = 2.0) -> int:
+    pids = find_browser_profile_processes(profile_dir)
+    if not pids:
+        return 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            continue
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline and any(process_is_alive(pid) for pid in pids):
+        time.sleep(0.05)
+    killed = 0
+    for pid in pids:
+        if not process_is_alive(pid):
+            killed += 1
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except ProcessLookupError:
+            killed += 1
+        except PermissionError:
+            pass
+    return killed
+
+
+def find_browser_profile_processes(profile_dir: Path) -> list[int]:
+    profile = str(profile_dir)
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return []
+    current_pid = os.getpid()
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, args = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        if browser_process_uses_profile(args, profile):
+            pids.append(pid)
+    return pids
+
+
+def browser_process_uses_profile(args: str, profile: str) -> bool:
+    lower_args = args.lower()
+    if "chrome" not in lower_args and "chromium" not in lower_args:
+        return False
+    return f"--user-data-dir={profile}" in args or f"--user-data-dir {profile}" in args
+
+
+def remove_chromium_profile_locks(profile_dir: Path) -> None:
+    for lock_name in CHROMIUM_PROFILE_LOCK_NAMES:
+        lock_path = profile_dir / lock_name
+        try:
+            if lock_path.exists() or lock_path.is_symlink():
+                lock_path.unlink()
+        except OSError:
+            pass
+
+
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def user_root(user_id: int) -> Path:

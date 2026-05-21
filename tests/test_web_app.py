@@ -454,6 +454,62 @@ class WebAppTest(unittest.TestCase):
         self.assertTrue(context.closed)
         self.assertTrue(playwright.stopped)
 
+    def test_force_release_cleans_current_user_browser_profiles(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmp:
+                original_web_dir = web_app.WEB_DIR
+                original_slugs = web_app.canonical_slugs
+                original_cleanup = web_app.cleanup_browser_profile_dirs
+                cleaned_dirs = []
+                web_app.WEB_DIR = Path(tmp)
+                web_app.canonical_slugs = lambda: ["xiaoya", "changjiang-yuketang"]
+
+                def fake_cleanup(profile_dirs):
+                    cleaned_dirs.extend(Path(item) for item in profile_dirs)
+                    return len(cleaned_dirs)
+
+                web_app.cleanup_browser_profile_dirs = fake_cleanup
+                try:
+                    manager = LoginSessionManager()
+                    await manager.force_release(user_id=7)
+                finally:
+                    web_app.WEB_DIR = original_web_dir
+                    web_app.canonical_slugs = original_slugs
+                    web_app.cleanup_browser_profile_dirs = original_cleanup
+            return cleaned_dirs
+
+        cleaned_dirs = asyncio.run(run_case())
+        self.assertTrue(any(path.name == "xiaoya" for path in cleaned_dirs))
+        self.assertTrue(any(path.name == "changjiang-yuketang" for path in cleaned_dirs))
+        self.assertTrue(all("users/7/browser-profiles" in str(path) for path in cleaned_dirs))
+
+    def test_chromium_profile_cleanup_removes_lock_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = Path(tmp) / "browser-profiles" / "xiaoya"
+            profile_dir.mkdir(parents=True)
+            for lock_name in web_app.CHROMIUM_PROFILE_LOCK_NAMES:
+                (profile_dir / lock_name).write_text("stale", encoding="utf-8")
+
+            web_app.cleanup_browser_profile_dirs([profile_dir])
+
+            for lock_name in web_app.CHROMIUM_PROFILE_LOCK_NAMES:
+                self.assertFalse((profile_dir / lock_name).exists())
+
+    def test_browser_process_profile_matcher_is_exact_to_user_data_dir(self):
+        profile = "/var/lib/homework-watcher/web/users/1/browser-profiles/xiaoya"
+        self.assertTrue(
+            web_app.browser_process_uses_profile(
+                f"/opt/chromium/chrome --user-data-dir={profile} about:blank",
+                profile,
+            )
+        )
+        self.assertFalse(
+            web_app.browser_process_uses_profile(
+                f"/opt/chromium/chrome --some-other-arg={profile} about:blank",
+                profile,
+            )
+        )
+
     def test_platform_login_manager_reuses_and_expires_sessions(self):
         class FakePage:
             async def goto(self, *args, **kwargs):
