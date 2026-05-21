@@ -78,6 +78,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--no-notify", action="store_true")
     scan_parser.set_defaults(handler=cmd_scan)
 
+    debug_xiaoya_parser = subparsers.add_parser(
+        "debug-xiaoya-structure",
+        help="诊断小雅结构化学任务页抓取",
+    )
+    debug_xiaoya_parser.add_argument("--headed", action="store_true", help="显示浏览器窗口")
+    debug_xiaoya_parser.add_argument("--json", action="store_true", help="输出 JSON")
+    debug_xiaoya_parser.set_defaults(handler=cmd_debug_xiaoya_structure)
+
     check_parser = subparsers.add_parser("check", help="检查临近截止和逾期作业，并输出每日汇总")
     check_parser.add_argument("--scan", action="store_true", help="提醒前先用 Playwright 扫描平台作业")
     check_parser.add_argument("--headed-scan", action="store_true", help="扫描时显示浏览器窗口")
@@ -229,6 +237,23 @@ def cmd_scan(args) -> int:
         return 2 if had_error else 0
     finally:
         db.close()
+
+
+def cmd_debug_xiaoya_structure(args) -> int:
+    from .platforms.xiaoya import debug_structure_assignments
+
+    items = debug_structure_assignments(headless=not args.headed, progress=print_progress)
+    if args.json:
+        print(json.dumps([item.to_dict() for item in items], ensure_ascii=False, indent=2))
+    else:
+        for item in items:
+            print(
+                f"[{item.platform}] {item.course} | {item.title} | "
+                f"截止 {human_datetime(item.due_at)} | 状态 {item.status}"
+            )
+        if not items:
+            print("未解析到结构化学任务。")
+    return 0
 
 
 def cmd_check(args) -> int:

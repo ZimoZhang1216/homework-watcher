@@ -6,19 +6,26 @@ from datetime import datetime
 from pathlib import Path
 
 from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapters
+import homework_watcher.platforms.xiaoya as xiaoya_module
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, PlaywrightUnavailableError, looks_like_empty_state
 from homework_watcher.platforms.xiaoya import (
     CourseEntry,
     XiaoyaAdapter,
+    browser_process_uses_profile,
     collect_current_page_course_names,
+    ensure_profile_available,
     normalize_course_task_url,
+    parse_xiaoya_json_assignments,
+    parse_xiaoya_task_page,
     parse_xiaoya_task_text,
     parse_xiaoya_row,
     scan_course_tasks,
     task_url_for,
+    task_url_for_course_id,
     xiaoya_text_is_loading,
 )
+from homework_watcher.statuses import platform_status_is_done
 
 
 class PlatformAdapterTests(unittest.TestCase):
@@ -193,6 +200,77 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual([item.title for item in items], ["作业-08", "实习2 点阵理论"])
         self.assertTrue(all(item.status == "未提交" for item in items))
 
+    def test_parse_xiaoya_structure_chemistry_inner_text_marks_completed_done(self):
+        items = parse_xiaoya_task_text(
+            """
+            标题
+            位置
+            任务类型
+            状态
+            发布方式
+            分配对象
+            发布时间
+            开始时间
+            截止时间
+            操作
+            作业-08 \\ 作业 进行中 全体 全体 2026-05-06 10:05:48 2026-05-06 10:10:14
+            2026-05-22 23:59:59
+            进入任务
+            实习1 分子对称性 \\ 作业 已完成 全体 全体 2026-05-06 10:06:48 2026-05-08 00:06:00
+            2026-05-22 23:59:59
+            进入任务
+            实习2 点阵理论 \\ 作业 进行中 全体 全体 2026-05-06 10:07:10 2026-05-15 00:06:53
+            2026-05-22 23:59:59
+            进入任务
+            """,
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+        )
+
+        by_title = {item.title: item for item in items}
+        self.assertEqual(set(by_title), {"作业-08", "实习1 分子对称性", "实习2 点阵理论"})
+        self.assertEqual(by_title["作业-08"].status, "未提交")
+        self.assertEqual(by_title["实习2 点阵理论"].status, "未提交")
+        self.assertTrue(platform_status_is_done(by_title["实习1 分子对称性"].status))
+        pending_titles = [item.title for item in items if not platform_status_is_done(item.status)]
+        self.assertEqual(pending_titles, ["作业-08", "实习2 点阵理论"])
+
+    def test_parse_xiaoya_json_assignments_recursively(self):
+        items = parse_xiaoya_json_assignments(
+            {
+                "data": {
+                    "records": [
+                        {
+                            "taskName": "作业-08",
+                            "taskStatus": "进行中",
+                            "endTime": "2026-05-22 23:59:59",
+                            "taskUrl": "/app/jx-web/mycourse/6902426124991620398/task/1?token=secret",
+                        },
+                        {
+                            "taskName": "实习1 分子对称性",
+                            "taskStatus": "已完成",
+                            "endTime": "2026-05-22 23:59:59",
+                        },
+                        {
+                            "taskName": "实习2 点阵理论",
+                            "taskStatus": "进行中",
+                            "endTime": "2026-05-22 23:59:59",
+                        },
+                    ]
+                }
+            },
+            course="结构化学",
+            platform="小雅",
+            fallback_url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+
+        by_title = {item.title: item for item in items}
+        self.assertEqual(set(by_title), {"作业-08", "实习1 分子对称性", "实习2 点阵理论"})
+        self.assertEqual(by_title["作业-08"].status, "未提交")
+        self.assertTrue(platform_status_is_done(by_title["实习1 分子对称性"].status))
+        self.assertIn("token=%3Credacted%3E", by_title["作业-08"].url)
+
     def test_parse_xiaoya_row_uses_last_datetime_when_columns_are_split(self):
         item = parse_xiaoya_row(
             [
@@ -218,6 +296,8 @@ class PlatformAdapterTests(unittest.TestCase):
 
     def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
         class FakePage:
+            url = "https://nankai.ai-augmented.com/app/jx-web/mycourse"
+
             def evaluate(self, script):
                 return [
                     "2026年春\n校内公开\n教务开课\n结构化学\n学院：化学学院",
@@ -227,6 +307,15 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(
             collect_current_page_course_names(FakePage()),
             ["结构化学", "大学物理学基础 II"],
+        )
+
+    def test_xiaoya_task_url_for_known_course_id(self):
+        self.assertEqual(
+            task_url_for_course_id(
+                "https://nankai.ai-augmented.com/app/jx-web/mycourse",
+                "6902426124991620398",
+            ),
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
         )
 
     def test_xiaoya_course_task_url_can_be_derived_from_card_id(self):
@@ -269,6 +358,69 @@ class PlatformAdapterTests(unittest.TestCase):
 
         self.assertIn("未能定位课程任务页 URL", str(ctx.exception))
         self.assertEqual(page.goto_calls, [])
+
+    def test_xiaoya_task_pagination_is_bounded(self):
+        class FakePage:
+            url = "https://example.test/task"
+
+        calls = {"clicks": 0}
+        original_collect = xiaoya_module.collect_visible_task_rows
+        original_text_parse = xiaoya_module.parse_xiaoya_task_text
+        original_body_text = xiaoya_module.safe_body_text
+        original_click = xiaoya_module.click_next_task_page
+        original_wait = xiaoya_module.wait_for_xiaoya_shell
+        try:
+            xiaoya_module.collect_visible_task_rows = lambda *args, **kwargs: []
+            xiaoya_module.parse_xiaoya_task_text = lambda *args, **kwargs: []
+            xiaoya_module.safe_body_text = lambda page: ""
+            xiaoya_module.wait_for_xiaoya_shell = lambda *args, **kwargs: None
+
+            def fake_click(*args, **kwargs):
+                calls["clicks"] += 1
+                return True
+
+            xiaoya_module.click_next_task_page = fake_click
+
+            items = parse_xiaoya_task_page(
+                FakePage(),
+                course="结构化学",
+                platform="小雅",
+                deadline=None,
+                max_pages=3,
+            )
+        finally:
+            xiaoya_module.collect_visible_task_rows = original_collect
+            xiaoya_module.parse_xiaoya_task_text = original_text_parse
+            xiaoya_module.safe_body_text = original_body_text
+            xiaoya_module.click_next_task_page = original_click
+            xiaoya_module.wait_for_xiaoya_shell = original_wait
+
+        self.assertEqual(items, [])
+        self.assertEqual(calls["clicks"], 2)
+
+    def test_xiaoya_profile_lock_detection_does_not_delete_active_profile_locks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile_dir = Path(tmp) / "xiaoya"
+            profile_dir.mkdir()
+            lock_path = profile_dir / "SingletonLock"
+            lock_path.write_text("active", encoding="utf-8")
+            original_finder = xiaoya_module.find_active_profile_processes
+            try:
+                xiaoya_module.find_active_profile_processes = lambda profile: [4321]
+                with self.assertRaises(PlaywrightUnavailableError):
+                    ensure_profile_available(profile_dir)
+                self.assertTrue(lock_path.exists())
+
+                xiaoya_module.find_active_profile_processes = lambda profile: []
+                ensure_profile_available(profile_dir)
+                self.assertFalse(lock_path.exists())
+            finally:
+                xiaoya_module.find_active_profile_processes = original_finder
+
+    def test_xiaoya_browser_profile_matcher_is_exact_to_user_data_dir(self):
+        profile = "/var/lib/homework-watcher/web/users/1/browser-profiles/xiaoya"
+        self.assertTrue(browser_process_uses_profile(f"/opt/chrome --user-data-dir={profile} about:blank", profile))
+        self.assertFalse(browser_process_uses_profile(f"/opt/chrome --other={profile} about:blank", profile))
 
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(

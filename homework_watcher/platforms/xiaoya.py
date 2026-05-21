@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from .base import (
     DEFAULT_CANDIDATE_SELECTORS,
@@ -29,13 +34,81 @@ FULL_DATETIME_RE = re.compile(
 )
 LOADING_TEXT_RE = re.compile(r"正在加载应用|加载应用|请稍候|loading", re.IGNORECASE)
 TASK_WORD_RE = re.compile(r"作业|任务|实习|练习|测验|问卷|讨论|提交")
-STATUS_RE = re.compile(r"进行中|未提交|待完成|未完成|已完成|已提交|已批改|未开始|未开放|未到开始时间")
+STATUS_RE = re.compile(
+    r"进行中|未提交|待完成|未完成|已截止但未完成|已完成|已提交|已批改|已批阅|未开始|未开放|未到开始时间"
+)
 COURSE_PATH_RE = re.compile(r"(/app/jx-web/mycourse/[^\"'<\s]+|/mycourse/[^\"'<\s]+)")
 COURSE_ID_RE = re.compile(
     r"(?:courseId|course_id|courseid|classroomId|classroom_id|clazzId|classId|courseCode|resourceId|id)"
     r"[\"'\s:=_-]+([1-9]\d{10,})",
     re.IGNORECASE,
 )
+DEBUG_DIR_ENV = "HW_XIAOYA_DEBUG_DIR"
+STRUCTURE_CHEMISTRY_COURSE_ID = os.environ.get("HW_XIAOYA_STRUCTURE_COURSE_ID", "6902426124991620398")
+KNOWN_COURSE_IDS = {"结构化学": STRUCTURE_CHEMISTRY_COURSE_ID} if STRUCTURE_CHEMISTRY_COURSE_ID else {}
+CHROMIUM_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+SENSITIVE_KEY_RE = re.compile(
+    r"cookie|authorization|token|password|passwd|secret|session|credential|key|ticket|csrf|jwt|access|refresh|signature|sid|openid",
+    re.IGNORECASE,
+)
+JSON_TASK_HINT_RE = re.compile(
+    r"task|title|name|status|state|due|deadline|end|close|finish|作业|任务|截止|状态|标题",
+    re.IGNORECASE,
+)
+TITLE_KEYS = {
+    "title",
+    "name",
+    "taskName",
+    "taskTitle",
+    "assignmentName",
+    "assignmentTitle",
+    "homeworkTitle",
+    "homeworkName",
+    "activityName",
+    "workName",
+    "resourceName",
+    "questionnaireName",
+}
+STATUS_KEYS = {
+    "status",
+    "state",
+    "submitStatus",
+    "finishStatus",
+    "completeStatus",
+    "completionStatus",
+    "taskStatus",
+    "progress",
+}
+DUE_KEYS = {
+    "due_at",
+    "dueAt",
+    "deadline",
+    "deadlineTime",
+    "submitEndTime",
+    "endTime",
+    "endDate",
+    "closeTime",
+    "finishTime",
+    "expireTime",
+    "limitTime",
+    "截止时间",
+}
+URL_KEYS = {
+    "url",
+    "link",
+    "href",
+    "jumpUrl",
+    "jump_url",
+    "taskUrl",
+    "task_url",
+    "resourceUrl",
+    "resource_url",
+    "activityUrl",
+    "activity_url",
+}
+URL_KEY_CANONICAL = {re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key.casefold()) for key in URL_KEYS}
+MAX_DEBUG_ARRAY_ITEMS = 80
+MAX_DEBUG_STRING_LENGTH = 1_000
 
 
 @dataclass(frozen=True)
@@ -43,6 +116,114 @@ class CourseEntry:
     name: str
     page_number: int
     task_url: str = ""
+
+
+class XiaoyaDebugDumper:
+    def __init__(self, root: Path | str | None = None):
+        configured = root if root is not None else os.environ.get(DEBUG_DIR_ENV, "")
+        self.root = Path(configured).expanduser() if configured else None
+        self.counter = 0
+        if self.root is not None:
+            self.root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def enabled(self) -> bool:
+        return self.root is not None
+
+    def dump_page(self, page, stage: str, *, course: str = "", course_id: str = "") -> None:
+        if self.root is None:
+            return
+        prefix = self._next_prefix(stage, course=course, course_id=course_id)
+        url = sanitize_url(getattr(page, "url", ""))
+        try:
+            body = redact_sensitive_text(safe_body_text(page))
+        except Exception as exc:
+            body = f"<failed to read body text: {exc}>"
+        try:
+            html = redact_sensitive_text(page.content())
+        except Exception as exc:
+            html = f"<failed to read page content: {exc}>"
+        (self.root / f"{prefix}.url").write_text(url, encoding="utf-8")
+        (self.root / f"{prefix}.txt").write_text(f"URL: {url}\n\n{body}", encoding="utf-8")
+        (self.root / f"{prefix}.html").write_text(html, encoding="utf-8")
+        try:
+            page.screenshot(path=str(self.root / f"{prefix}.png"), full_page=True, timeout=5_000)
+        except Exception as exc:
+            (self.root / f"{prefix}.png.error.txt").write_text(str(exc), encoding="utf-8")
+
+    def dump_json_candidate(self, stage: str, payload: dict, *, course: str = "", course_id: str = "") -> None:
+        if self.root is None:
+            return
+        prefix = self._next_prefix(stage, course=course, course_id=course_id)
+        (self.root / f"{prefix}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+    def _next_prefix(self, stage: str, *, course: str = "", course_id: str = "") -> str:
+        self.counter += 1
+        parts = [f"{self.counter:03d}", safe_filename(stage)]
+        if course:
+            parts.append(safe_filename(course))
+        if course_id:
+            parts.append(safe_filename(course_id))
+        return "-".join(part for part in parts if part)
+
+
+class XiaoyaNetworkRecorder:
+    def __init__(self, debug: XiaoyaDebugDumper, *, course: str, platform: str, page_url: str):
+        self.debug = debug
+        self.course = course
+        self.platform = platform
+        self.page_url = page_url
+        self.candidates: list[dict] = []
+
+    def attach(self, page) -> None:
+        page.on("response", self._handle_response)
+
+    def detach(self, page) -> None:
+        try:
+            page.remove_listener("response", self._handle_response)
+        except Exception:
+            pass
+
+    def _handle_response(self, response) -> None:
+        try:
+            request = response.request
+            resource_type = getattr(request, "resource_type", "")
+            content_type = response.headers.get("content-type", "")
+            if resource_type not in {"xhr", "fetch"} and "json" not in content_type.lower():
+                return
+            if "json" not in content_type.lower():
+                return
+            data = response.json()
+        except Exception:
+            return
+        if not json_has_task_hints(data):
+            return
+        payload = {
+            "url": sanitize_url(response.url),
+            "method": getattr(response.request, "method", ""),
+            "status": response.status,
+            "content_type": response.headers.get("content-type", ""),
+            "request_payload_shape": request_payload_shape(response.request),
+            "response_json": sanitize_json(data),
+        }
+        self.candidates.append(payload)
+        self.debug.dump_json_candidate("network-candidate", payload, course=self.course)
+
+    def assignments(self, *, fallback_url: str) -> list[PlatformAssignment]:
+        parsed: list[PlatformAssignment] = []
+        for candidate in self.candidates:
+            parsed.extend(
+                parse_xiaoya_json_assignments(
+                    candidate.get("response_json"),
+                    course=self.course,
+                    platform=self.platform,
+                    fallback_url=fallback_url,
+                )
+            )
+        return dedupe_assignments(parsed)
 
 
 class XiaoyaAdapter(PlaywrightPlatformAdapter):
@@ -53,7 +234,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         "https://nankai.ai-augmented.com/app/jx-web/mycourse",
     )
     scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "600"))
-    course_timeout_seconds = int(os.environ.get("HW_XIAOYA_COURSE_TIMEOUT_SECONDS", "60"))
+    course_timeout_seconds = int(os.environ.get("HW_XIAOYA_COURSE_TIMEOUT_SECONDS", "45"))
     max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
     max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "100"))
     max_task_pages = int(os.environ.get("HW_XIAOYA_MAX_TASK_PAGES", "20"))
@@ -80,12 +261,15 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         progress: ProgressCallback = None,
     ) -> list[PlatformAssignment]:
         sync_playwright, playwright_error = load_playwright()
+        ensure_profile_available(self.user_data_dir)
+        debug = XiaoyaDebugDumper()
         with sync_playwright() as playwright:
             context = self._launch_context(playwright, headless=headless)
             deadline = time.monotonic() + self.scan_timeout_seconds
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 open_xiaoya_page(page, self.url, deadline=deadline, progress=progress, label="打开课程列表")
+                debug.dump_page(page, "course-list")
                 if self.is_login_required(page):
                     raise LoginRequiredError(
                         f"{self.platform_name} 登录状态已失效。请在网站里重新打开小雅登录。"
@@ -121,6 +305,9 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         f"{self.platform_name}：扫描课程 {index + 1}/{len(course_entries)} {course.name}",
                     )
                     try:
+                        if not course.task_url:
+                            debug.dump_page(page, "course-without-task-url", course=course.name)
+                            raise PlaywrightUnavailableError("未能定位课程任务页 URL，已跳过以避免卡住")
                         items = scan_course_tasks(
                             page,
                             course,
@@ -129,14 +316,18 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                             deadline=course_deadline,
                             max_pages=self.max_task_pages,
                             progress=progress,
+                            debug=debug,
+                            course_index=index + 1,
                         )
                     except PlaywrightUnavailableError as exc:
+                        debug.dump_page(page, "course-scan-error", course=course.name)
                         if time.monotonic() >= deadline:
                             raise
                         skipped.append(f"{course.name}: {truncate(str(exc), 80)}")
                         emit_progress(progress, f"{self.platform_name}：跳过课程 {course.name}，原因：{truncate(str(exc), 42)}")
                         continue
                     except Exception as exc:
+                        debug.dump_page(page, "course-scan-error", course=course.name)
                         skipped.append(f"{course.name}: {truncate(str(exc), 80)}")
                         emit_progress(progress, f"{self.platform_name}：跳过课程 {course.name}，原因：{truncate(str(exc), 42)}")
                         continue
@@ -161,10 +352,318 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
             finally:
                 context.close()
 
+    def fetch_structure_debug_assignments(
+        self,
+        *,
+        headless: bool = True,
+        progress: ProgressCallback = None,
+    ) -> list[PlatformAssignment]:
+        """Open the known structure chemistry task page and parse it through all Xiaoya paths."""
+        sync_playwright, playwright_error = load_playwright()
+        ensure_profile_available(self.user_data_dir)
+        debug = XiaoyaDebugDumper()
+        course = CourseEntry(
+            name="结构化学",
+            page_number=1,
+            task_url=task_url_for_course_id(self.url, STRUCTURE_CHEMISTRY_COURSE_ID),
+        )
+        with sync_playwright() as playwright:
+            context = self._launch_context(playwright, headless=headless)
+            deadline = time.monotonic() + min(self.scan_timeout_seconds, self.course_timeout_seconds)
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                return scan_course_tasks(
+                    page,
+                    course,
+                    start_url=self.url,
+                    platform=self.platform_name,
+                    deadline=deadline,
+                    max_pages=self.max_task_pages,
+                    progress=progress,
+                    debug=debug,
+                    course_index=1,
+                )
+            except playwright_error as exc:
+                raise PlaywrightUnavailableError(f"{self.platform_name} 结构化学诊断失败：{exc}") from exc
+            finally:
+                context.close()
+
 
 def fetch_assignments(*, headless: bool = True, progress: ProgressCallback = None):
     """Fetch assignments from Xiaoya without submitting anything."""
     return XiaoyaAdapter().fetch_assignments(headless=headless, progress=progress)
+
+
+def debug_structure_assignments(
+    *,
+    headless: bool = True,
+    progress: ProgressCallback = None,
+) -> list[PlatformAssignment]:
+    """Debug the known Structure Chemistry Xiaoya task page."""
+    return XiaoyaAdapter().fetch_structure_debug_assignments(headless=headless, progress=progress)
+
+
+def safe_filename(value: str) -> str:
+    value = compact_text(str(value or "")).replace("\n", " ")
+    value = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "-", value).strip("-._")
+    return (value or "page")[:80]
+
+
+def sanitize_url(url: str) -> str:
+    parts = urlsplit(str(url or ""))
+    if not parts.query:
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", parts.fragment))
+    sanitized_pairs = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        sanitized_pairs.append((key, "<redacted>" if SENSITIVE_KEY_RE.search(key) else value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(sanitized_pairs), parts.fragment))
+
+
+def request_payload_shape(request) -> Any:
+    try:
+        post_data = getattr(request, "post_data", None)
+        if callable(post_data):
+            post_data = post_data()
+    except Exception:
+        return None
+    if not post_data:
+        return None
+    try:
+        parsed = json.loads(post_data)
+    except Exception:
+        try:
+            pairs = parse_qsl(str(post_data), keep_blank_values=True)
+        except Exception:
+            return {"type": "text", "length": len(str(post_data))}
+        if not pairs:
+            return {"type": "text", "length": len(str(post_data))}
+        return {"type": "form", "keys": [key for key, _ in pairs]}
+    return json_shape(parsed)
+
+
+def json_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_shape(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return {"type": "list", "length": len(value), "item": json_shape(value[0]) if value else None}
+    return type(value).__name__
+
+
+def sanitize_json(value: Any, *, key: str = "") -> Any:
+    if key and SENSITIVE_KEY_RE.search(key):
+        return "<redacted>"
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            child_key = str(raw_key)
+            if is_url_json_key(child_key) and isinstance(item, str):
+                sanitized[child_key] = sanitize_url(item)
+            else:
+                sanitized[child_key] = sanitize_json(item, key=child_key)
+        return sanitized
+    if isinstance(value, list):
+        items = [sanitize_json(item, key=key) for item in value[:MAX_DEBUG_ARRAY_ITEMS]]
+        if len(value) > MAX_DEBUG_ARRAY_ITEMS:
+            items.append({"_truncated": len(value) - MAX_DEBUG_ARRAY_ITEMS})
+        return items
+    if isinstance(value, str):
+        if looks_like_sensitive_string(value):
+            return "<redacted>"
+        if len(value) > MAX_DEBUG_STRING_LENGTH:
+            return value[:MAX_DEBUG_STRING_LENGTH] + f"...<truncated {len(value) - MAX_DEBUG_STRING_LENGTH} chars>"
+    return value
+
+
+def looks_like_sensitive_string(value: str) -> bool:
+    if re.match(r"^eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", value):
+        return True
+    if len(value) > 160 and re.fullmatch(r"[A-Za-z0-9_.:/+=-]+", value):
+        return True
+    return False
+
+
+def redact_sensitive_text(text: str) -> str:
+    sensitive_name = (
+        r"authorization|cookie|token|password|passwd|secret|session|credential|ticket|csrf|jwt|"
+        r"access[_-]?token|refresh[_-]?token|hw_web_secret_key|hw_web_admin_token|smtp"
+    )
+    text = re.sub(
+        rf"(?i)({sensitive_name})(\s*[:=]\s*)([^\s&\"'<>]+)",
+        r"\1\2<redacted>",
+        text,
+    )
+    text = re.sub(
+        rf"(?i)((?:{sensitive_name})=)([^&\"'<>\\s]+)",
+        r"\1<redacted>",
+        text,
+    )
+    return text
+
+
+def json_has_task_hints(value: Any, *, depth: int = 0) -> bool:
+    if depth > 8:
+        return False
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if JSON_TASK_HINT_RE.search(str(key)):
+                return True
+            if json_has_task_hints(item, depth=depth + 1):
+                return True
+    elif isinstance(value, list):
+        return any(json_has_task_hints(item, depth=depth + 1) for item in value[:MAX_DEBUG_ARRAY_ITEMS])
+    elif isinstance(value, str) and len(value) < 300:
+        return bool(JSON_TASK_HINT_RE.search(value))
+    return False
+
+
+def parse_xiaoya_json_assignments(
+    value: Any,
+    *,
+    course: str,
+    platform: str,
+    fallback_url: str,
+) -> list[PlatformAssignment]:
+    assignments: list[PlatformAssignment] = []
+    for node in iter_json_dicts(value):
+        item = assignment_from_json_node(node, course=course, platform=platform, fallback_url=fallback_url)
+        if item is not None:
+            assignments.append(item)
+    return dedupe_assignments(assignments)
+
+
+def iter_json_dicts(value: Any, *, depth: int = 0):
+    if depth > 10:
+        return
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from iter_json_dicts(item, depth=depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_json_dicts(item, depth=depth + 1)
+
+
+def assignment_from_json_node(
+    node: dict,
+    *,
+    course: str,
+    platform: str,
+    fallback_url: str,
+) -> PlatformAssignment | None:
+    raw_title = first_key_value(node, TITLE_KEYS)
+    due_value = first_key_value(node, DUE_KEYS)
+    if raw_title is None or due_value is None:
+        return None
+    title = clean_xiaoya_title(str(raw_title))
+    if not title or looks_like_xiaoya_metadata(title):
+        return None
+    due_at = datetime_from_json_value(due_value)
+    if due_at is None:
+        return None
+    raw_status = first_key_value(node, STATUS_KEYS)
+    status = guess_row_status([str(raw_status)]) if raw_status is not None else "未知"
+    raw_url = first_key_value(node, URL_KEYS)
+    url = fallback_url
+    if isinstance(raw_url, str) and raw_url.strip():
+        url = sanitize_url(urljoin(fallback_url, raw_url.strip()))
+    return PlatformAssignment(
+        title=title,
+        course=course,
+        platform=platform,
+        due_at=due_at,
+        status=status,
+        url=url,
+    )
+
+
+def first_key_value(node: dict, keys: set[str]) -> Any:
+    exact = {canonical_json_key(key): key for key in keys}
+    for raw_key, value in node.items():
+        if canonical_json_key(str(raw_key)) in exact and value not in (None, ""):
+            return value
+    return None
+
+
+def canonical_json_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value.casefold())
+
+
+def is_url_json_key(value: str) -> bool:
+    return canonical_json_key(value) in URL_KEY_CANONICAL
+
+
+def datetime_from_json_value(value: Any):
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return find_datetime(value)
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        if 946684800 <= timestamp <= 4102444800:
+            try:
+                return datetime.fromtimestamp(timestamp)
+            except (OSError, OverflowError, ValueError):
+                return None
+    return None
+
+
+def ensure_profile_available(profile_dir: Path) -> None:
+    active_pids = find_active_profile_processes(profile_dir)
+    if active_pids:
+        raise PlaywrightUnavailableError(
+            "小雅远程登录浏览器仍在运行，请先释放远程登录会话再扫描。"
+            f"占用进程：{', '.join(str(pid) for pid in active_pids[:6])}"
+        )
+    remove_stale_chromium_profile_locks(profile_dir)
+
+
+def find_active_profile_processes(profile_dir: Path) -> list[int]:
+    profile = str(profile_dir.expanduser())
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return []
+    current_pid = os.getpid()
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, args = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        if browser_process_uses_profile(args, profile):
+            pids.append(pid)
+    return pids
+
+
+def browser_process_uses_profile(args: str, profile: str) -> bool:
+    lower_args = args.lower()
+    if "chrome" not in lower_args and "chromium" not in lower_args:
+        return False
+    return f"--user-data-dir={profile}" in args or f"--user-data-dir {profile}" in args
+
+
+def remove_stale_chromium_profile_locks(profile_dir: Path) -> None:
+    for lock_name in CHROMIUM_PROFILE_LOCK_NAMES:
+        lock_path = profile_dir / lock_name
+        try:
+            if lock_path.exists() or lock_path.is_symlink():
+                lock_path.unlink()
+        except OSError:
+            pass
 
 
 def ensure_scan_time_left(deadline: float, step: str) -> None:
@@ -343,18 +842,12 @@ def collect_course_entries(
         if deadline is not None:
             ensure_scan_time_left(deadline, "读取课程列表")
         page_entries = collect_current_page_course_entries(page, page_number=page_number)
-        page_entries = resolve_missing_course_task_urls(
-            page,
-            page_entries,
-            page_number=page_number,
-            deadline=deadline,
-            progress=progress,
-            platform_name=platform_name,
-        )
         for entry in page_entries:
             key = entry.name.casefold()
             if not entry.name or key in seen:
                 continue
+            if not entry.task_url:
+                emit_progress(progress, f"{platform_name}：课程 {entry.name} 未识别到任务页 URL，后续将跳过")
             seen.add(key)
             entries.append(entry)
             if len(entries) >= max_courses:
@@ -394,6 +887,10 @@ def collect_current_page_course_entries(page, *, page_number: int) -> list[Cours
         else:
             continue
         if name:
+            if not task_url:
+                course_id = known_course_id_for(name)
+                if course_id:
+                    task_url = task_url_for_course_id(page.url, course_id)
             entries.append(CourseEntry(name=name, page_number=page_number, task_url=task_url))
     return entries
 
@@ -441,9 +938,18 @@ def normalize_course_task_url(raw_url: str, *, html: str, base_url: str) -> str:
         return task_url_for(urljoin(base_url, value))
     course_id = find_course_id(html)
     if course_id:
-        base = urlsplit(base_url)
-        return urlunsplit((base.scheme, base.netloc, f"/app/jx-web/mycourse/{course_id}/task", "", ""))
+        return task_url_for_course_id(base_url, course_id)
     return ""
+
+
+def task_url_for_course_id(base_url: str, course_id: str) -> str:
+    base = urlsplit(base_url)
+    return urlunsplit((base.scheme, base.netloc, f"/app/jx-web/mycourse/{course_id}/task", "", ""))
+
+
+def known_course_id_for(course_name: str) -> str:
+    normalized = compact_text(course_name)
+    return KNOWN_COURSE_IDS.get(normalized, "")
 
 
 def find_course_id(text: str) -> str:
@@ -452,88 +958,6 @@ def find_course_id(text: str) -> str:
     for match in re.finditer(r"\b([1-9]\d{14,})\b", text):
         return match.group(1)
     return ""
-
-
-def resolve_missing_course_task_urls(
-    page,
-    entries: list[CourseEntry],
-    *,
-    page_number: int,
-    deadline: float | None,
-    progress: ProgressCallback,
-    platform_name: str,
-) -> list[CourseEntry]:
-    if not entries or all(entry.task_url for entry in entries):
-        return entries
-    resolved: list[CourseEntry] = []
-    for entry in entries:
-        if entry.task_url:
-            resolved.append(entry)
-            continue
-        task_url = capture_course_task_url(page, entry.name, deadline=deadline)
-        if task_url:
-            resolved.append(CourseEntry(name=entry.name, page_number=entry.page_number, task_url=task_url))
-            emit_progress(progress, f"{platform_name}：已定位课程任务页 {entry.name}")
-        else:
-            resolved.append(entry)
-        ensure_course_list_page(page, page_number=page_number, deadline=deadline)
-    return resolved
-
-
-def capture_course_task_url(page, course_name: str, *, deadline: float | None) -> str:
-    if deadline is not None:
-        ensure_scan_time_left(deadline, f"定位课程任务页 {course_name}")
-    before_url = page.url
-    try:
-        clicked = page.evaluate(
-            """
-            name => {
-              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
-              const cards = Array.from(document.querySelectorAll('.aia_course_card'));
-              const card = cards.find(node => compact(node.innerText || node.textContent).includes(name));
-              if (!card) return false;
-              card.click();
-              return true;
-            }
-            """,
-            course_name,
-        )
-    except Exception:
-        clicked = False
-    if not clicked:
-        return ""
-    try:
-        timeout = remaining_timeout_ms(deadline, 5_000) if deadline is not None else 5_000
-        page.wait_for_function(
-            """previous => location.href !== previous && /\\/mycourse\\/[^/]+/.test(location.pathname)""",
-            before_url,
-            timeout=timeout,
-        )
-    except Exception:
-        return ""
-    if "/mycourse/" not in page.url:
-        return ""
-    return task_url_for(page.url)
-
-
-def ensure_course_list_page(page, *, page_number: int, deadline: float | None) -> None:
-    if page.locator(".aia_course_card").count() == 0:
-        try:
-            timeout = remaining_timeout_ms(deadline, 5_000) if deadline is not None else 5_000
-            page.go_back(wait_until="domcontentloaded", timeout=timeout)
-        except Exception:
-            pass
-    wait_for_xiaoya_shell(page, timeout_ms=4_000, settle_ms=300)
-    if page.locator(".aia_course_card").count() == 0:
-        try:
-            timeout = remaining_timeout_ms(deadline, 8_000) if deadline is not None else 8_000
-            page.goto(XiaoyaAdapter.start_url, wait_until="domcontentloaded", timeout=timeout)
-        except Exception:
-            pass
-        wait_for_xiaoya_shell(page, timeout_ms=5_000, settle_ms=300)
-        ensure_student_course_tab(page)
-        wait_for_xiaoya_shell(page, timeout_ms=4_000, settle_ms=300)
-    go_to_course_page(page, page_number, deadline=deadline)
 
 
 def extract_course_name(text: str) -> str:
@@ -597,22 +1021,45 @@ def scan_course_tasks(
     deadline: float,
     max_pages: int,
     progress: ProgressCallback,
+    debug: XiaoyaDebugDumper | None = None,
+    course_index: int = 0,
 ) -> list[PlatformAssignment]:
+    debug = debug or XiaoyaDebugDumper()
     if course.task_url:
         target_url = course.task_url
         emit_progress(progress, f"{platform}：进入任务页 {course.name}")
-        page.goto(target_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 15_000))
     else:
         raise PlaywrightUnavailableError("未能定位课程任务页 URL，已跳过以避免卡住")
-    wait_for_xiaoya_shell(page, timeout_ms=8_000, settle_ms=700)
-    recover_xiaoya_loading_page(page, deadline=deadline, progress=progress)
-    return parse_xiaoya_task_page(
-        page,
-        course=course.name,
-        platform=platform,
-        deadline=deadline,
-        max_pages=max_pages,
-    )
+    recorder = XiaoyaNetworkRecorder(debug, course=course.name, platform=platform, page_url=target_url)
+    recorder.attach(page)
+    try:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, 15_000))
+            wait_for_xiaoya_shell(page, timeout_ms=8_000, settle_ms=700)
+            recover_xiaoya_loading_page(page, deadline=deadline, progress=progress)
+            debug.dump_page(
+                page,
+                f"{course_index:03d}-task" if course_index else "task",
+                course=course.name,
+                course_id=course_id_from_task_url(target_url),
+            )
+            network_items = recorder.assignments(fallback_url=page.url)
+            if network_items:
+                emit_progress(progress, f"{platform}：{course.name} 通过接口识别 {len(network_items)} 条任务")
+                return network_items
+            return parse_xiaoya_task_page(
+                page,
+                course=course.name,
+                platform=platform,
+                deadline=deadline,
+                max_pages=max_pages,
+                debug=debug,
+            )
+        except Exception:
+            debug.dump_page(page, "task-scan-error", course=course.name, course_id=course_id_from_task_url(target_url))
+            raise
+    finally:
+        recorder.detach(page)
 
 
 def go_to_course_page(page, page_number: int, *, deadline: float | None = None) -> None:
@@ -638,16 +1085,28 @@ def parse_xiaoya_task_page(
     platform: str,
     deadline: float | None = None,
     max_pages: int = 20,
+    debug: XiaoyaDebugDumper | None = None,
 ) -> list[PlatformAssignment]:
+    debug = debug or XiaoyaDebugDumper()
     assignments: list[PlatformAssignment] = []
     for page_index in range(max_pages):
         if deadline is not None:
             ensure_scan_time_left(deadline, "读取任务列表")
         assignments.extend(collect_visible_task_rows(page, course=course, platform=platform))
         assignments.extend(parse_xiaoya_task_text(safe_body_text(page), course=course, platform=platform, url=page.url))
-        if not click_next_task_page(page, deadline=deadline):
+        if page_index >= max_pages - 1:
             break
-        wait_for_xiaoya_shell(page, timeout_ms=4_000, settle_ms=400)
+        try:
+            if not click_next_task_page(page, deadline=deadline):
+                break
+            wait_for_xiaoya_shell(page, timeout_ms=10_000, settle_ms=400)
+            debug.dump_page(page, f"task-page-{page_index + 2}", course=course)
+        except PlaywrightUnavailableError:
+            debug.dump_page(page, "task-pagination-timeout", course=course)
+            break
+        except Exception:
+            debug.dump_page(page, "task-pagination-failed", course=course)
+            break
     if assignments:
         return dedupe_assignments(assignments)
 
@@ -835,7 +1294,7 @@ def parse_xiaoya_task_text(text: str, *, course: str, platform: str, url: str) -
             continue
         if not TASK_WORD_RE.search(line):
             continue
-        block = "\n".join(lines[index : index + 4])
+        block = collect_task_text_block(lines, index)
         if not TASK_WORD_RE.search(block) or not STATUS_RE.search(block):
             continue
         if len(FULL_DATETIME_RE.findall(block)) == 0:
@@ -845,6 +1304,21 @@ def parse_xiaoya_task_text(text: str, *, course: str, platform: str, url: str) -
         if item is not None:
             assignments.append(item)
     return dedupe_assignments(assignments)
+
+
+def collect_task_text_block(lines: list[str], start_index: int) -> str:
+    block = [lines[start_index]]
+    for line in lines[start_index + 1 : start_index + 8]:
+        if is_xiaoya_task_start_line(line) and FULL_DATETIME_RE.search("\n".join(block)):
+            break
+        block.append(line)
+        if line == "进入任务":
+            break
+    return "\n".join(block)
+
+
+def is_xiaoya_task_start_line(line: str) -> bool:
+    return bool(TASK_WORD_RE.search(line) and STATUS_RE.search(line) and FULL_DATETIME_RE.search(line))
 
 
 def split_task_text_block(block: str) -> list[str]:
@@ -942,7 +1416,9 @@ def guess_row_status(cells: list[str]) -> str:
         return "不可完成的作业"
     if "进行中" in joined or "未提交" in joined or "待完成" in joined or "未完成" in joined:
         return "未提交"
-    if "已提交" in joined or "已完成" in joined or "已批改" in joined:
+    if "已完成" in joined:
+        return "已完成"
+    if "已提交" in joined or "已批改" in joined or "已批阅" in joined:
         return "已提交"
     return "未知"
 
