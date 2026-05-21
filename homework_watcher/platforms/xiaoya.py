@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -41,6 +42,11 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         "HW_XIAOYA_URL",
         "https://nankai.ai-augmented.com/app/jx-web/mycourse",
     )
+    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "600"))
+    course_timeout_seconds = int(os.environ.get("HW_XIAOYA_COURSE_TIMEOUT_SECONDS", "45"))
+    max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
+    max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "80"))
+    max_task_pages = int(os.environ.get("HW_XIAOYA_MAX_TASK_PAGES", "5"))
     candidate_selectors = [
         "[class*='homework' i]",
         "[class*='assignment' i]",
@@ -53,6 +59,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 
     def _launch_context(self, playwright, *, headless: bool):
         context = super()._launch_context(playwright, headless=headless)
+        context.set_default_timeout(5_000)
         prefer_student_course_tab(context)
         return context
 
@@ -65,55 +72,86 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         sync_playwright, playwright_error = load_playwright()
         with sync_playwright() as playwright:
             context = self._launch_context(playwright, headless=headless)
+            deadline = time.monotonic() + self.scan_timeout_seconds
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 emit_progress(progress, f"{self.platform_name}：打开课程列表")
-                page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                self.wait_until_ready(page)
+                page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, self.timeout_ms))
+                self.wait_until_ready(page, network_timeout=4_000, settle_ms=500)
                 ensure_student_course_tab(page)
-                self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
+                self.wait_until_ready(page, network_timeout=4_000, settle_ms=500)
                 if self.is_login_required(page):
                     raise LoginRequiredError(
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
                     )
 
-                course_entries = collect_course_entries(page)
+                course_entries = collect_course_entries(
+                    page,
+                    progress=progress,
+                    platform_name=self.platform_name,
+                    deadline=deadline,
+                    max_pages=self.max_course_pages,
+                    max_courses=self.max_courses,
+                )
                 emit_progress(progress, f"{self.platform_name}：发现 {len(course_entries)} 门课程")
                 assignments: list[PlatformAssignment] = []
+                skipped_courses: list[str] = []
                 for index, course_entry in enumerate(course_entries):
+                    ensure_scan_time_left(deadline, f"扫描课程 {index + 1}/{len(course_entries)}")
+                    course_deadline = min(deadline, time.monotonic() + self.course_timeout_seconds)
                     course_name = course_entry.name
                     emit_progress(
                         progress,
                         f"{self.platform_name}：扫描课程 {index + 1}/{len(course_entries)} {course_name}",
                     )
-                    page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                    self.wait_until_ready(page)
-                    ensure_student_course_tab(page)
-                    self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
-                    go_to_course_page(page, course_entry.page_number)
-                    card = page.locator(".aia_course_card").filter(has_text=course_name).first
-                    if card.count() == 0:
+                    try:
+                        page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(course_deadline, self.timeout_ms))
+                        self.wait_until_ready(page, network_timeout=3_000, settle_ms=400)
+                        ensure_student_course_tab(page)
+                        self.wait_until_ready(page, network_timeout=3_000, settle_ms=400)
+                        go_to_course_page(page, course_entry.page_number, deadline=course_deadline)
+                        card = page.locator(".aia_course_card").filter(has_text=course_name).first
+                        if card.count() == 0:
+                            skipped_courses.append(f"{course_name}: 未找到课程卡片")
+                            continue
+                        card.click(timeout=remaining_timeout_ms(course_deadline, 5_000))
+                        self.wait_until_ready(page, network_timeout=4_000, settle_ms=500)
+                        task_url = task_url_for(page.url)
+                        page.goto(task_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(course_deadline, self.timeout_ms))
+                        self.wait_until_ready(page, network_timeout=4_000, settle_ms=700)
+                        course_assignments = parse_xiaoya_task_page(
+                            page,
+                            course=course_name,
+                            platform=self.platform_name,
+                            deadline=course_deadline,
+                            max_pages=self.max_task_pages,
+                        )
+                    except PlaywrightUnavailableError as exc:
+                        if time.monotonic() >= deadline:
+                            raise
+                        skipped_courses.append(f"{course_name}: {truncate(str(exc), 80)}")
+                        emit_progress(progress, f"{self.platform_name}：跳过课程 {course_name}，原因：{truncate(str(exc), 42)}")
                         continue
-                    card.click(timeout=8_000)
-                    self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_000)
-                    task_url = task_url_for(page.url)
-                    page.goto(task_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                    self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_200)
-                    course_assignments = parse_xiaoya_task_page(
-                        page,
-                        course=course_name,
-                        platform=self.platform_name,
-                    )
+                    except Exception as exc:
+                        skipped_courses.append(f"{course_name}: {truncate(str(exc), 80)}")
+                        emit_progress(progress, f"{self.platform_name}：跳过课程 {course_name}，原因：{truncate(str(exc), 42)}")
+                        continue
                     if course_assignments:
                         emit_progress(progress, f"{self.platform_name}：{course_name} 识别 {len(course_assignments)} 条任务")
                     assignments.extend(course_assignments)
 
                 if assignments:
                     assignments = dedupe_assignments(assignments)
-                    emit_progress(progress, f"{self.platform_name}：完成，识别 {len(assignments)} 条任务")
+                    if skipped_courses:
+                        emit_progress(progress, f"{self.platform_name}：完成，识别 {len(assignments)} 条任务，跳过 {len(skipped_courses)} 门课程")
+                    else:
+                        emit_progress(progress, f"{self.platform_name}：完成，识别 {len(assignments)} 条任务")
                     return assignments
                 if course_entries:
-                    emit_progress(progress, f"{self.platform_name}：完成，未发现待记录任务")
+                    if skipped_courses:
+                        emit_progress(progress, f"{self.platform_name}：完成，跳过 {len(skipped_courses)} 门课程，未发现待记录任务")
+                    else:
+                        emit_progress(progress, f"{self.platform_name}：完成，未发现待记录任务")
                     return []
                 return self.parse_candidate_blocks(
                     [CandidateBlock(safe_body_text(page), page.url)],
@@ -130,6 +168,25 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 def fetch_assignments(*, headless: bool = True, progress: ProgressCallback = None):
     """Fetch assignments from Xiaoya without submitting anything."""
     return XiaoyaAdapter().fetch_assignments(headless=headless, progress=progress)
+
+
+def ensure_scan_time_left(deadline: float, step: str) -> None:
+    if time.monotonic() >= deadline:
+        raise PlaywrightUnavailableError(f"小雅扫描超时，停在：{step}")
+
+
+def remaining_timeout_ms(deadline: float, default_ms: int) -> int:
+    remaining = int((deadline - time.monotonic()) * 1000)
+    if remaining <= 0:
+        raise PlaywrightUnavailableError("小雅扫描超时")
+    return max(800, min(default_ms, remaining))
+
+
+def truncate(value: str, length: int) -> str:
+    value = compact_text(value)
+    if len(value) <= length:
+        return value
+    return value[: max(0, length - 1)] + "…"
 
 
 def prefer_student_course_tab(context) -> None:
@@ -171,15 +228,29 @@ def collect_visible_course_names(page) -> list[str]:
     return [entry.name for entry in collect_course_entries(page)]
 
 
-def collect_course_entries(page) -> list[CourseEntry]:
+def collect_course_entries(
+    page,
+    *,
+    progress: ProgressCallback = None,
+    platform_name: str = "小雅",
+    deadline: float | None = None,
+    max_pages: int = 30,
+    max_courses: int = 80,
+) -> list[CourseEntry]:
     entries: list[CourseEntry] = []
     seen: set[str] = set()
     page_number = 1
-    for _ in range(20):
+    for _ in range(max_pages):
+        if deadline is not None:
+            ensure_scan_time_left(deadline, "读取课程列表")
         for name in collect_current_page_course_names(page):
             if name and name not in seen:
                 seen.add(name)
                 entries.append(CourseEntry(name=name, page_number=page_number))
+                if len(entries) >= max_courses:
+                    emit_progress(progress, f"{platform_name}：课程数量达到上限 {max_courses}，停止继续翻页")
+                    return entries
+        emit_progress(progress, f"{platform_name}：读取课程列表第 {page_number} 页，累计 {len(entries)} 门")
         if not click_next_course_page(page):
             break
         page_number += 1
@@ -187,18 +258,41 @@ def collect_course_entries(page) -> list[CourseEntry]:
 
 
 def collect_current_page_course_names(page) -> list[str]:
+    try:
+        raw_names = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('.aia_course_card'))
+              .slice(0, 100)
+              .map(card => card.getAttribute('data-xy-click-pt-name') || card.innerText || '')
+            """
+        )
+    except Exception:
+        raw_names = []
+    names: list[str] = []
+    for text in raw_names:
+        name = extract_course_name(str(text))
+        if name and name not in names:
+            names.append(name)
+    if names:
+        return names
+
     cards = page.locator(".aia_course_card")
     names: list[str] = []
     for index in range(min(cards.count(), 80)):
-        text = compact_text(cards.nth(index).inner_text(timeout=1_000))
+        try:
+            text = compact_text(cards.nth(index).inner_text(timeout=500))
+        except Exception:
+            continue
         name = extract_course_name(text)
         if name and name not in names:
             names.append(name)
     return names
 
 
-def go_to_course_page(page, page_number: int) -> None:
+def go_to_course_page(page, page_number: int, *, deadline: float | None = None) -> None:
     for _ in range(max(0, page_number - 1)):
+        if deadline is not None:
+            ensure_scan_time_left(deadline, f"跳转课程列表第 {page_number} 页")
         if not click_next_course_page(page):
             break
 
@@ -230,16 +324,16 @@ def wait_for_course_page_update(page, previous_signature: str) -> None:
               return names.length > 0 && names.join('\\n') !== previous;
             }""",
             previous_signature,
-            timeout=5_000,
+            timeout=2_000,
         )
     except Exception:
         pass
     try:
-        page.wait_for_load_state("networkidle", timeout=5_000)
+        page.wait_for_load_state("networkidle", timeout=1_500)
     except Exception:
         pass
     try:
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(300)
     except Exception:
         pass
 
@@ -266,10 +360,20 @@ def task_url_for(url: str) -> str:
     return url.rstrip("/") + "/task"
 
 
-def parse_xiaoya_task_page(page, *, course: str, platform: str) -> list[PlatformAssignment]:
+def parse_xiaoya_task_page(
+    page,
+    *,
+    course: str,
+    platform: str,
+    deadline: float | None = None,
+    max_pages: int = 5,
+) -> list[PlatformAssignment]:
+    prefer_pending_task_filter(page)
     assignments = collect_visible_task_rows(page, course=course, platform=platform)
-    for _ in range(20):
-        if not click_next_task_page(page):
+    for _ in range(max(0, max_pages - 1)):
+        if deadline is not None:
+            ensure_scan_time_left(deadline, "读取任务列表")
+        if not click_next_task_page(page, deadline=deadline):
             break
         assignments.extend(collect_visible_task_rows(page, course=course, platform=platform))
     if assignments:
@@ -359,13 +463,65 @@ def collapse_duplicate_cells(cells: list[str]) -> list[str]:
     return collapsed
 
 
-def click_next_task_page(page) -> bool:
+def prefer_pending_task_filter(page) -> None:
+    try:
+        before = visible_row_signature(page)
+        changed = page.evaluate(
+            """
+            () => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const labels = Array.from(document.querySelectorAll('label, .ant-checkbox-wrapper'));
+              const label = labels.find(node => compact(node.innerText || node.textContent).includes('仅关注待完成任务'));
+              if (!label) return false;
+              const input = label.querySelector('input[type="checkbox"]');
+              if (input && input.checked) return false;
+              const target = input || label.querySelector('.ant-checkbox, span') || label;
+              target.click();
+              return true;
+            }
+            """
+        )
+        if changed:
+            wait_for_task_filter_update(page, before)
+    except Exception:
+        pass
+
+
+def wait_for_task_filter_update(page, previous_signature: str) -> None:
+    try:
+        page.wait_for_function(
+            """previous => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const rows = Array.from(document.querySelectorAll('tbody tr')).slice(0, 3);
+              const text = rows.map(row => compact(row.innerText || row.textContent)).join('\\n');
+              const body = compact(document.body ? document.body.innerText : '');
+              return text !== previous || /暂无|没有|空/.test(body);
+            }""",
+            previous_signature,
+            timeout=2_500,
+        )
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=1_000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
+def click_next_task_page(page, *, deadline: float | None = None) -> bool:
+    if deadline is not None:
+        ensure_scan_time_left(deadline, "任务列表翻页")
     next_button = page.locator(".ant-pagination-next:not(.ant-pagination-disabled)").first
     if next_button.count() == 0:
         return False
     before = visible_row_signature(page)
     try:
-        next_button.click(timeout=3_000)
+        timeout = 3_000 if deadline is None else remaining_timeout_ms(deadline, 3_000)
+        next_button.click(timeout=timeout)
     except Exception:
         return False
     wait_for_task_page_update(page, before)
@@ -392,16 +548,16 @@ def wait_for_task_page_update(page, previous_signature: str) -> None:
               return text && text !== previous;
             }""",
             previous_signature,
-            timeout=5_000,
+            timeout=1_500,
         )
     except Exception:
         pass
     try:
-        page.wait_for_load_state("networkidle", timeout=5_000)
+        page.wait_for_load_state("networkidle", timeout=1_000)
     except Exception:
         pass
     try:
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(300)
     except Exception:
         pass
 

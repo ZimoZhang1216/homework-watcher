@@ -8,7 +8,12 @@ from pathlib import Path
 from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapters
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
 from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_state
-from homework_watcher.platforms.xiaoya import parse_xiaoya_row, task_url_for
+from homework_watcher.platforms.xiaoya import (
+    XiaoyaAdapter,
+    collect_current_page_course_names,
+    parse_xiaoya_row,
+    task_url_for,
+)
 
 
 class PlatformAdapterTests(unittest.TestCase):
@@ -20,6 +25,13 @@ class PlatformAdapterTests(unittest.TestCase):
             "https://nankai.ai-augmented.com/app/jx-web/mycourse",
         )
         self.assertEqual([adapter.slug for adapter in iter_adapters(["all"])], ["changjiang-yuketang", "xiaoya"])
+
+    def test_xiaoya_scan_has_bounded_defaults(self):
+        adapter = XiaoyaAdapter()
+
+        self.assertLessEqual(adapter.course_timeout_seconds, 60)
+        self.assertLessEqual(adapter.max_task_pages, 5)
+        self.assertGreaterEqual(adapter.max_courses, 14)
 
     def test_adapter_parses_unified_assignment_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -172,6 +184,19 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(item.title, "作业-08")
         self.assertEqual(item.due_at, datetime(2026, 5, 22, 23, 59))
+
+    def test_xiaoya_course_names_are_collected_with_page_evaluate(self):
+        class FakePage:
+            def evaluate(self, script):
+                return [
+                    "2026年春\n校内公开\n教务开课\n结构化学\n学院：化学学院",
+                    "2026年春\n大学物理学基础 II\n学院：大学物理及实验",
+                ]
+
+        self.assertEqual(
+            collect_current_page_course_names(FakePage()),
+            ["结构化学", "大学物理学基础 II"],
+        )
 
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(
