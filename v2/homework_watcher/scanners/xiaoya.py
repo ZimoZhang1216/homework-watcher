@@ -7,6 +7,7 @@ from pathlib import Path
 
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.config_loader import KnownCourseConfig
+from homework_watcher.debug_dump import dump_debug_page
 from homework_watcher.settings import Settings, load_settings, resolve_path
 from homework_watcher.status import normalize_status
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -168,6 +169,7 @@ class XiaoyaScanner:
                                 page,
                                 course,
                                 course_timeout_seconds=30,
+                                scan_id=context.scan_id,
                                 emit=lambda message, p=percent: context.emit(p, message),
                             )
                         )
@@ -184,6 +186,7 @@ class XiaoyaScanner:
         course: KnownCourseConfig,
         *,
         course_timeout_seconds: int,
+        scan_id: str = "manual",
         emit=None,
     ) -> list[AssignmentCandidate]:
         deadline = monotonic_time.monotonic() + course_timeout_seconds
@@ -195,6 +198,14 @@ class XiaoyaScanner:
         )
         text = read_visible_text(page)
         if looks_like_login_page(text):
+            dump_debug_page(
+                page,
+                self.settings,
+                scan_id=scan_id,
+                stage="login-or-empty",
+                course=course.course,
+                page_no=1,
+            )
             raise RuntimeError("小雅登录态可能失效，请先运行 login-xiaoya 手动登录")
         all_candidates: list[AssignmentCandidate] = []
         seen_pages: set[str] = set()
@@ -213,6 +224,15 @@ class XiaoyaScanner:
             seen_pages.add(page_key)
 
             page_candidates = self.scan_known_course_text(course, text)
+            if page_no == 1 and not page_candidates:
+                dump_debug_page(
+                    page,
+                    self.settings,
+                    scan_id=scan_id,
+                    stage="empty-parse",
+                    course=course.course,
+                    page_no=page_no,
+                )
             for candidate in page_candidates:
                 key = (candidate.title, candidate.due_at)
                 if key in seen_assignments:

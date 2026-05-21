@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -94,11 +95,16 @@ class ScanService:
 
             self._log(scan_id, "platform start %s scanner=%s", platform_key, type(scanner).__name__)
             try:
+                def emit_progress(percent: int, message: str) -> None:
+                    self._log(scan_id, "progress percent=%s message=%s", percent, message)
+                    if progress:
+                        progress(percent, message)
+
                 context = ScannerContext(
                     scan_id=scan_id,
                     platform_key=platform_key,
                     platform_config=self.configs.get(platform_key),
-                    progress=progress,
+                    progress=emit_progress,
                 )
                 candidates = scanner.scan(context)
                 self._log(
@@ -170,6 +176,10 @@ LAST_SCAN_RESULTS: list[ScanResult] = []
 
 def latest_scan_result() -> ScanResult | None:
     return LAST_SCAN_RESULTS[-1] if LAST_SCAN_RESULTS else None
+
+
+def scanner_source_path(scanner_cls) -> str:
+    return inspect.getsourcefile(scanner_cls) or ""
 
 
 def is_fake_course_summary(candidate: AssignmentCandidate) -> bool:
