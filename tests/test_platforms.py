@@ -8,7 +8,12 @@ from pathlib import Path
 from homework_watcher.platforms import canonical_slugs, get_adapter, iter_adapters
 import homework_watcher.platforms.xiaoya as xiaoya_module
 from homework_watcher.platforms.changjiang_yuketang import parse_yuketang_log_text
-from homework_watcher.platforms.base import CandidateBlock, PlaywrightUnavailableError, looks_like_empty_state
+from homework_watcher.platforms.base import (
+    CandidateBlock,
+    PlatformAssignment,
+    PlaywrightUnavailableError,
+    looks_like_empty_state,
+)
 from homework_watcher.platforms.xiaoya import (
     CourseEntry,
     XiaoyaAdapter,
@@ -16,6 +21,8 @@ from homework_watcher.platforms.xiaoya import (
     collect_current_page_course_names,
     course_id_from_task_url,
     ensure_profile_available,
+    has_real_course_assignments,
+    looks_like_course_summary_assignment,
     normalize_course_task_url,
     parse_xiaoya_json_assignments,
     parse_xiaoya_task_page,
@@ -271,6 +278,29 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(by_title["作业-08"].status, "未提交")
         self.assertTrue(platform_status_is_done(by_title["实习1 分子对称性"].status))
         self.assertIn("token=%3Credacted%3E", by_title["作业-08"].url)
+
+    def test_xiaoya_course_summary_is_not_real_assignment(self):
+        summary = PlatformAssignment(
+            title="结构化学",
+            course="结构化学",
+            platform="小雅",
+            due_at=datetime(2026, 7, 31),
+            status="未知",
+            url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+        task = PlatformAssignment(
+            title="实习2 点阵理论",
+            course="结构化学",
+            platform="小雅",
+            due_at=datetime(2026, 5, 22, 23, 59, 59),
+            status="未提交",
+            url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+
+        self.assertTrue(looks_like_course_summary_assignment(summary))
+        self.assertFalse(looks_like_course_summary_assignment(task))
+        self.assertFalse(has_real_course_assignments([summary], "结构化学"))
+        self.assertTrue(has_real_course_assignments([summary, task], "结构化学"))
 
     def test_parse_xiaoya_row_uses_last_datetime_when_columns_are_split(self):
         item = parse_xiaoya_row(

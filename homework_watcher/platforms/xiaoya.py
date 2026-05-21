@@ -335,6 +335,16 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         emit_progress(progress, f"{self.platform_name}：{course.name} 识别 {len(items)} 条任务")
                     assignments.extend(items)
 
+                assignments.extend(
+                    self._scan_missing_known_course_tasks(
+                        page,
+                        assignments,
+                        deadline=deadline,
+                        progress=progress,
+                        debug=debug,
+                        start_index=len(course_entries) + 1,
+                    )
+                )
                 assignments = dedupe_assignments(assignments)
                 if assignments:
                     suffix = f"，跳过 {len(skipped)} 门课程" if skipped else ""
@@ -351,6 +361,54 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                 raise PlaywrightUnavailableError(f"{self.platform_name} 扫描失败：{exc}") from exc
             finally:
                 context.close()
+
+    def _scan_missing_known_course_tasks(
+        self,
+        page,
+        assignments: list[PlatformAssignment],
+        *,
+        deadline: float,
+        progress: ProgressCallback,
+        debug: XiaoyaDebugDumper,
+        start_index: int,
+    ) -> list[PlatformAssignment]:
+        fallback_items: list[PlatformAssignment] = []
+        for offset, (course_name, course_id) in enumerate(KNOWN_COURSE_IDS.items()):
+            current = assignments + fallback_items
+            if has_real_course_assignments(current, course_name):
+                continue
+            ensure_scan_time_left(deadline, f"补扫已知课程 {course_name}")
+            course_deadline = min(deadline, time.monotonic() + self.course_timeout_seconds)
+            course = CourseEntry(
+                name=course_name,
+                page_number=0,
+                task_url=task_url_for_course_id(self.url, course_id),
+            )
+            emit_progress(progress, f"{self.platform_name}：补扫已知课程 {course_name}")
+            try:
+                items = scan_course_tasks(
+                    page,
+                    course,
+                    start_url=self.url,
+                    platform=self.platform_name,
+                    deadline=course_deadline,
+                    max_pages=self.max_task_pages,
+                    progress=progress,
+                    debug=debug,
+                    course_index=start_index + offset,
+                )
+            except PlaywrightUnavailableError as exc:
+                debug.dump_page(page, "known-course-scan-error", course=course_name, course_id=course_id)
+                emit_progress(progress, f"{self.platform_name}：补扫 {course_name} 失败：{truncate(str(exc), 42)}")
+                continue
+            except Exception as exc:
+                debug.dump_page(page, "known-course-scan-error", course=course_name, course_id=course_id)
+                emit_progress(progress, f"{self.platform_name}：补扫 {course_name} 失败：{truncate(str(exc), 42)}")
+                continue
+            if items:
+                emit_progress(progress, f"{self.platform_name}：{course_name} 补扫识别 {len(items)} 条任务")
+                fallback_items.extend(items)
+        return fallback_items
 
     def fetch_structure_debug_assignments(
         self,
@@ -957,6 +1015,16 @@ def known_course_id_for(course_name: str) -> str:
     return KNOWN_COURSE_IDS.get(normalized, "")
 
 
+def has_real_course_assignments(assignments: list[PlatformAssignment], course_name: str) -> bool:
+    target = compact_text(course_name)
+    return any(
+        item.platform == "小雅"
+        and compact_text(item.course) == target
+        and compact_text(item.title) != target
+        for item in assignments
+    )
+
+
 def find_course_id(text: str) -> str:
     for match in COURSE_ID_RE.finditer(text):
         return match.group(1)
@@ -1432,9 +1500,20 @@ def dedupe_assignments(assignments: list[PlatformAssignment]) -> list[PlatformAs
     seen: set[tuple[str, str, str]] = set()
     unique: list[PlatformAssignment] = []
     for item in assignments:
+        if looks_like_course_summary_assignment(item):
+            continue
         key = (item.title.casefold(), item.course.casefold(), item.due_at.isoformat())
         if key in seen:
             continue
         seen.add(key)
         unique.append(item)
     return unique
+
+
+def looks_like_course_summary_assignment(item: PlatformAssignment) -> bool:
+    return (
+        item.platform == "小雅"
+        and compact_text(item.course) != ""
+        and compact_text(item.title) == compact_text(item.course)
+        and item.status in {"", "未知"}
+    )
