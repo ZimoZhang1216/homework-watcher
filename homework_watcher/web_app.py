@@ -37,6 +37,7 @@ from .platforms.base import (
     PlaywrightUnavailableError,
     format_playwright_error,
 )
+from .platforms.xiaoya import xiaoya_text_is_loading
 from .recurring_assignments import materialize_recurring_assignments
 from .statuses import assignment_is_done, platform_status_is_done
 
@@ -44,7 +45,7 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.15"
+APP_VERSION = "V-1.16"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
@@ -306,6 +307,8 @@ class LoginSessionManager:
             )
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(adapter.url, wait_until="domcontentloaded", timeout=adapter.timeout_ms)
+            if adapter.slug == "xiaoya":
+                await recover_xiaoya_remote_login_page(page, adapter.url)
             with self.lock:
                 self.active = {
                     "user_id": user.id,
@@ -965,6 +968,103 @@ def load_async_playwright_for_web():
             "未安装 Playwright。请运行：python3 -m pip install -e . && python3 -m playwright install chromium"
         ) from exc
     return async_playwright, PlaywrightError
+
+
+async def recover_xiaoya_remote_login_page(page, start_url: str) -> None:
+    await wait_for_xiaoya_remote_shell(page, timeout_ms=8_000)
+    if not await async_xiaoya_page_is_loading(page):
+        return
+    for attempt in range(2):
+        await clear_xiaoya_runtime_cache_async(page)
+        target_url = cache_busted_url(start_url) if attempt == 0 else start_url
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=12_000)
+        except Exception:
+            pass
+        await wait_for_xiaoya_remote_shell(page, timeout_ms=8_000)
+        if not await async_xiaoya_page_is_loading(page):
+            return
+    await page.set_content(
+        """
+        <!doctype html>
+        <html lang="zh-CN">
+        <head><meta charset="utf-8"><title>小雅加载失败</title></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 48px; line-height: 1.7;">
+          <h1>小雅页面没有加载完成</h1>
+          <p>系统已自动清理远程浏览器里的小雅缓存和 service worker，并重载两次，但页面仍停在加载进度。</p>
+          <p>请回到 Homework Watcher 页面点击“放弃本次登录”，稍后重新打开“小雅”。如果仍然出现，通常是小雅静态资源在这台服务器网络下暂时不可用。</p>
+        </body>
+        </html>
+        """,
+        wait_until="domcontentloaded",
+    )
+
+
+async def async_xiaoya_page_is_loading(page) -> bool:
+    try:
+        if await page.locator(".aia_course_card").count() > 0:
+            return False
+    except Exception:
+        pass
+    try:
+        body_text = await page.locator("body").inner_text(timeout=1_500)
+    except Exception:
+        body_text = ""
+    return xiaoya_text_is_loading(body_text)
+
+
+async def clear_xiaoya_runtime_cache_async(page) -> None:
+    try:
+        await page.evaluate(
+            """
+            async () => {
+              try {
+                if ('serviceWorker' in navigator) {
+                  const registrations = await navigator.serviceWorker.getRegistrations();
+                  await Promise.all(registrations.map(registration => registration.unregister()));
+                }
+              } catch (_) {}
+              try {
+                if ('caches' in window) {
+                  const names = await caches.keys();
+                  await Promise.all(names.map(name => caches.delete(name)));
+                }
+              } catch (_) {}
+              try {
+                sessionStorage.setItem("course_home_tabs_current", "study");
+              } catch (_) {}
+            }
+            """
+        )
+    except Exception:
+        pass
+
+
+async def wait_for_xiaoya_remote_shell(page, *, timeout_ms: int) -> None:
+    try:
+        await page.wait_for_function(
+            """() => {
+              const body = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim();
+              const hasCourseCards = document.querySelectorAll('.aia_course_card').length > 0;
+              const hasLogin = document.querySelectorAll('input[type="password"], input[name*="password" i]').length > 0;
+              const stillLoading = /正在加载应用|加载应用|请稍候|loading/i.test(body);
+              return hasCourseCards || hasLogin || !stillLoading;
+            }""",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
+def cache_busted_url(url: str) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["_hw_reload"] = str(int(time.time()))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def user_homework_db_path(user_id: int) -> Path:

@@ -13,6 +13,7 @@ from homework_watcher.platforms.xiaoya import (
     collect_current_page_course_names,
     parse_xiaoya_row,
     task_url_for,
+    xiaoya_text_is_loading,
 )
 
 
@@ -32,6 +33,10 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertLessEqual(adapter.course_timeout_seconds, 60)
         self.assertLessEqual(adapter.max_task_pages, 5)
         self.assertGreaterEqual(adapter.max_courses, 14)
+
+    def test_xiaoya_loading_text_is_detected(self):
+        self.assertTrue(xiaoya_text_is_loading("39%\n正在加载应用，请稍候。。。"))
+        self.assertFalse(xiaoya_text_is_loading("我的课程\n结构化学\n作业任务"))
 
     def test_adapter_parses_unified_assignment_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

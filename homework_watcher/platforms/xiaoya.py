@@ -27,6 +27,7 @@ FULL_DATETIME_RE = re.compile(
     r"20\d{2}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*(?:日)?\s+"
     r"\d{1,2}\s*[:：]\s*\d{1,2}(?:\s*[:：]\s*\d{1,2})?"
 )
+LOADING_TEXT_RE = re.compile(r"正在加载应用|加载应用|请稍候|loading", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,10 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                 emit_progress(progress, f"{self.platform_name}：打开课程列表")
                 page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, self.timeout_ms))
                 self.wait_until_ready(page, network_timeout=4_000, settle_ms=500)
+                recover_xiaoya_loading_page(page, deadline=deadline, progress=progress)
                 ensure_student_course_tab(page)
                 self.wait_until_ready(page, network_timeout=4_000, settle_ms=500)
+                recover_xiaoya_loading_page(page, deadline=deadline, progress=progress)
                 if self.is_login_required(page):
                     raise LoginRequiredError(
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
@@ -107,8 +110,10 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                     try:
                         page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(course_deadline, self.timeout_ms))
                         self.wait_until_ready(page, network_timeout=3_000, settle_ms=400)
+                        recover_xiaoya_loading_page(page, deadline=course_deadline, progress=progress)
                         ensure_student_course_tab(page)
                         self.wait_until_ready(page, network_timeout=3_000, settle_ms=400)
+                        recover_xiaoya_loading_page(page, deadline=course_deadline, progress=progress)
                         go_to_course_page(page, course_entry.page_number, deadline=course_deadline)
                         card = page.locator(".aia_course_card").filter(has_text=course_name).first
                         if card.count() == 0:
@@ -119,6 +124,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         task_url = task_url_for(page.url)
                         page.goto(task_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(course_deadline, self.timeout_ms))
                         self.wait_until_ready(page, network_timeout=4_000, settle_ms=700)
+                        recover_xiaoya_loading_page(page, deadline=course_deadline, progress=progress)
                         course_assignments = parse_xiaoya_task_page(
                             page,
                             course=course_name,
@@ -187,6 +193,98 @@ def truncate(value: str, length: int) -> str:
     if len(value) <= length:
         return value
     return value[: max(0, length - 1)] + "…"
+
+
+def recover_xiaoya_loading_page(
+    page,
+    *,
+    deadline: float | None = None,
+    progress: ProgressCallback = None,
+    attempts: int = 2,
+) -> None:
+    if not xiaoya_page_is_loading(page):
+        return
+    emit_progress(progress, "小雅：页面停在加载状态，清理本地缓存并重载")
+    for attempt in range(attempts):
+        if deadline is not None:
+            ensure_scan_time_left(deadline, "恢复小雅加载页")
+        clear_xiaoya_runtime_cache(page)
+        try:
+            timeout = remaining_timeout_ms(deadline, 8_000) if deadline is not None else 8_000
+            page.reload(wait_until="domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+        wait_for_xiaoya_app_shell(page, timeout_ms=5_000, settle_ms=500)
+        if not xiaoya_page_is_loading(page):
+            emit_progress(progress, "小雅：加载状态已恢复")
+            return
+        if attempt == 0:
+            emit_progress(progress, "小雅：首次重载仍未恢复，再试一次")
+    raise PlaywrightUnavailableError(
+        "小雅页面卡在“正在加载应用”。已自动清理缓存并重载，仍未恢复。"
+        "请关闭远程浏览器后重新打开小雅登录；如果仍然如此，可能是小雅静态资源在服务器网络下暂时不可用。"
+    )
+
+
+def xiaoya_page_is_loading(page) -> bool:
+    try:
+        if page.locator(".aia_course_card").count() > 0:
+            return False
+    except Exception:
+        pass
+    return xiaoya_text_is_loading(safe_body_text(page))
+
+
+def xiaoya_text_is_loading(text: str) -> bool:
+    compacted = compact_text(text)
+    return bool(LOADING_TEXT_RE.search(compacted))
+
+
+def clear_xiaoya_runtime_cache(page) -> None:
+    try:
+        page.evaluate(
+            """
+            async () => {
+              try {
+                if ('serviceWorker' in navigator) {
+                  const registrations = await navigator.serviceWorker.getRegistrations();
+                  await Promise.all(registrations.map(registration => registration.unregister()));
+                }
+              } catch (_) {}
+              try {
+                if ('caches' in window) {
+                  const names = await caches.keys();
+                  await Promise.all(names.map(name => caches.delete(name)));
+                }
+              } catch (_) {}
+              try {
+                sessionStorage.setItem("course_home_tabs_current", "study");
+              } catch (_) {}
+            }
+            """
+        )
+    except Exception:
+        pass
+
+
+def wait_for_xiaoya_app_shell(page, *, timeout_ms: int = 6_000, settle_ms: int = 500) -> None:
+    try:
+        page.wait_for_function(
+            """() => {
+              const body = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim();
+              const hasCourseCards = document.querySelectorAll('.aia_course_card').length > 0;
+              const hasLogin = document.querySelectorAll('input[type="password"], input[name*="password" i]').length > 0;
+              const stillLoading = /正在加载应用|加载应用|请稍候|loading/i.test(body);
+              return hasCourseCards || hasLogin || !stillLoading;
+            }""",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(settle_ms)
+    except Exception:
+        pass
 
 
 def prefer_student_course_tab(context) -> None:
