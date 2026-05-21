@@ -14,6 +14,7 @@ from homework_watcher.platforms.xiaoya import (
     XiaoyaAdapter,
     browser_process_uses_profile,
     collect_current_page_course_names,
+    course_id_from_task_url,
     ensure_profile_available,
     normalize_course_task_url,
     parse_xiaoya_json_assignments,
@@ -316,6 +317,12 @@ class PlatformAdapterTests(unittest.TestCase):
                 "6902426124991620398",
             ),
             "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+        self.assertEqual(
+            course_id_from_task_url(
+                "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task?x=1"
+            ),
+            "6902426124991620398",
         )
 
     def test_xiaoya_course_task_url_can_be_derived_from_card_id(self):

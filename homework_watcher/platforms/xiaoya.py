@@ -947,6 +947,11 @@ def task_url_for_course_id(base_url: str, course_id: str) -> str:
     return urlunsplit((base.scheme, base.netloc, f"/app/jx-web/mycourse/{course_id}/task", "", ""))
 
 
+def course_id_from_task_url(url: str) -> str:
+    match = re.search(r"/mycourse/([^/?#]+)/task", urlsplit(url).path)
+    return match.group(1) if match else ""
+
+
 def known_course_id_for(course_name: str) -> str:
     normalized = compact_text(course_name)
     return KNOWN_COURSE_IDS.get(normalized, "")
