@@ -91,6 +91,50 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(expired.status, "failed")
         self.assertIn("任务超时", expired.message)
 
+    def test_web_store_can_cancel_running_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WebStore(Path(tmp) / "web.db")
+            user = store.create_user(
+                email="demo@example.com",
+                report_email="demo@example.com",
+                password="long-enough-password",
+            )
+            job = store.create_job(user_id=user.id, kind="scan")
+            cancelled = store.cancel_job(user_id=user.id, job_id=job.id)
+            is_running = store.job_is_running(job.id)
+            updated = store.get_job(job.id)
+
+        self.assertTrue(cancelled)
+        self.assertFalse(is_running)
+        self.assertEqual(updated.status, "cancelled")
+        self.assertIn("手动结束", updated.message)
+
+    def test_running_job_row_has_cancel_button(self):
+        running = web_app.WebJob(
+            id=12,
+            user_id=1,
+            kind="scan",
+            status="running",
+            message="扫描小雅",
+            progress=45,
+            created_at="2026-05-21 08:00:00",
+            updated_at="2026-05-21 08:01:00",
+        )
+        success = web_app.WebJob(
+            id=13,
+            user_id=1,
+            kind="scan",
+            status="success",
+            message="扫描完成",
+            progress=100,
+            created_at="2026-05-21 08:00:00",
+            updated_at="2026-05-21 08:02:00",
+        )
+
+        self.assertIn("/jobs/12/cancel", web_app.render_job_row(running))
+        self.assertIn("结束", web_app.render_job_row(running))
+        self.assertNotIn("/jobs/13/cancel", web_app.render_job_row(success))
+
     def test_recurring_assignments_can_be_marked_done_from_dashboard(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_web_dir = web_app.WEB_DIR

@@ -44,13 +44,17 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.12"
+APP_VERSION = "V-1.13"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
 WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "900"))
 JobProgress = Callable[[str, int | None], None]
+
+
+class JobCancelled(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,26 @@ class WebStore:
                 (status, message, progress, timestamp_now(), job_id),
             )
             self.conn.commit()
+
+    def cancel_job(self, *, user_id: int, job_id: int) -> bool:
+        with self.lock:
+            cursor = self.conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled',
+                    message = '已手动结束。',
+                    updated_at = ?
+                WHERE id = ? AND user_id = ? AND status = 'running'
+                """,
+                (timestamp_now(), job_id, user_id),
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+
+    def job_is_running(self, job_id: int) -> bool:
+        with self.lock:
+            row = self.conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return bool(row and row["status"] == "running")
 
     def update_job_progress(self, *, job_id: int, message: str, progress: int | None = None) -> None:
         normalized = None if progress is None else max(0, min(100, int(progress)))
@@ -467,6 +491,12 @@ def create_app():
         start_background_job(store, user=user, kind="send-report", task=lambda progress: send_user_report(user, progress=progress))
         return RedirectResponse("/", status_code=303)
 
+    @app.post("/jobs/{job_id}/cancel")
+    async def cancel_job(request: Request, job_id: int):
+        user = require_user(request, store)
+        store.cancel_job(user_id=user.id, job_id=job_id)
+        return RedirectResponse("/", status_code=303)
+
     @app.post("/admin/run-daily")
     async def run_daily(request: Request):
         if not admin_authorized(request):
@@ -672,7 +702,8 @@ def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) ->
             emit_job_progress(progress, f"{adapter.platform_name}：完成，识别 {len(items)} 条", platform_end)
         emit_job_progress(progress, "替换当前待办", 86)
         removed = db.delete_pending_assignments()
-        for item in scanned_items:
+        for index, item in enumerate(scanned_items):
+            emit_job_progress(progress, f"写入扫描结果 {index + 1}/{len(scanned_items)}", 87)
             assignment, _ = db.add_assignment(
                 title=item.title,
                 course=item.course,
@@ -725,11 +756,15 @@ def start_background_job(store: WebStore, *, user: WebUser, kind: str, task: Cal
 
     def worker() -> None:
         def report_progress(message: str, percent: int | None = None) -> None:
+            if not store.job_is_running(job.id):
+                raise JobCancelled()
             store.update_job_progress(job_id=job.id, message=message, progress=percent)
 
         try:
             report_progress("正在运行", 5)
             message = task(report_progress)
+        except JobCancelled:
+            return
         except Exception as exc:
             store.finish_job(job_id=job.id, status="failed", message=str(exc))
         else:
@@ -1040,6 +1075,7 @@ def render_assignment_action(item) -> str:
 def render_job_row(job: WebJob) -> str:
     progress = max(0, min(100, job.progress))
     progress_markup = ""
+    action_markup = ""
     if job.status == "running":
         progress_markup = (
             "<div class='progress-line'>"
@@ -1047,11 +1083,16 @@ def render_job_row(job: WebJob) -> str:
             f"<span class='progress-value'>{progress}%</span>"
             "</div>"
         )
+        action_markup = (
+            f"<form method='post' action='/jobs/{job.id}/cancel' class='job-cancel-form'>"
+            "<button type='submit' class='danger-link'>结束</button>"
+            "</form>"
+        )
     return (
         "<div class='job-row'>"
         f"<span class='status-badge {job_status_class(job.status)}'>{escape(job_status_label(job.status))}</span>"
         f"<strong>{escape(job_kind_label(job.kind))}</strong>"
-        f"<time>{escape(job.updated_at)}</time>"
+        f"<div class='job-meta'><time>{escape(job.updated_at)}</time>{action_markup}</div>"
         f"<p>{escape(job.message or '处理中')}</p>"
         f"{progress_markup}"
         "</div>"
@@ -1071,6 +1112,7 @@ def job_status_label(status: str) -> str:
         "running": "运行中",
         "success": "成功",
         "failed": "失败",
+        "cancelled": "已结束",
     }.get(status, status)
 
 
@@ -1079,6 +1121,7 @@ def job_status_class(status: str) -> str:
         "running": "running",
         "success": "success",
         "failed": "failed",
+        "cancelled": "cancelled",
     }.get(status, "normal")
 
 
@@ -1314,11 +1357,15 @@ def page(title: str, body: str, *, status_code: int = 200):
     .status-badge.success {{ border-color: #b7d8c8; background: var(--green-soft); color: #1f6a50; }}
     .status-badge.failed, .status-badge.overdue {{ border-color: #e5b7b1; background: var(--red-soft); color: var(--red); }}
     .status-badge.running, .status-badge.today, .status-badge.soon {{ border-color: #e5c989; background: var(--amber-soft); color: var(--amber); }}
+    .status-badge.cancelled {{ border-color: #cfd7d1; background: #f3f5ef; color: var(--muted); }}
     .job-list {{ border-top: 1px solid var(--line); }}
     .job-row {{ display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 13px 0; border-bottom: 1px solid var(--line); }}
     .job-row:last-child {{ border-bottom: 0; padding-bottom: 0; }}
     .job-row p {{ grid-column: 2 / -1; margin: 0; color: var(--muted); overflow-wrap: anywhere; }}
     .job-row time {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
+    .job-meta {{ display: inline-flex; gap: 10px; align-items: center; justify-content: flex-end; }}
+    .job-cancel-form {{ margin: 0; }}
+    .danger-link {{ width: auto; min-height: 28px; border-color: #e5b7b1; background: var(--red-soft); color: var(--red); padding: 4px 9px; font-size: 12px; }}
     .progress-line {{ grid-column: 2 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }}
     .progress-track {{ height: 8px; overflow: hidden; border-radius: 999px; background: #e7e9e1; }}
     .progress-track span {{ display: block; height: 100%; border-radius: inherit; background: var(--primary); }}
