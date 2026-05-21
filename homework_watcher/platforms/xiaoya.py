@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -36,9 +35,6 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         "HW_XIAOYA_URL",
         "https://nankai.ai-augmented.com/app/jx-web/mycourse",
     )
-    scan_timeout_seconds = int(os.environ.get("HW_XIAOYA_SCAN_TIMEOUT_SECONDS", "600"))
-    max_course_pages = int(os.environ.get("HW_XIAOYA_MAX_COURSE_PAGES", "30"))
-    max_courses = int(os.environ.get("HW_XIAOYA_MAX_COURSES", "80"))
     candidate_selectors = [
         "[class*='homework' i]",
         "[class*='assignment' i]",
@@ -51,7 +47,6 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 
     def _launch_context(self, playwright, *, headless: bool):
         context = super()._launch_context(playwright, headless=headless)
-        context.set_default_timeout(5_000)
         prefer_student_course_tab(context)
         return context
 
@@ -64,11 +59,10 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         sync_playwright, playwright_error = load_playwright()
         with sync_playwright() as playwright:
             context = self._launch_context(playwright, headless=headless)
-            deadline = time.monotonic() + self.scan_timeout_seconds
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 emit_progress(progress, f"{self.platform_name}：打开课程列表")
-                page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, self.timeout_ms))
+                page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                 self.wait_until_ready(page)
                 ensure_student_course_tab(page)
                 self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
@@ -77,51 +71,33 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         f"{self.platform_name} 登录状态已失效。请运行：hw login {self.slug}"
                     )
 
-                course_entries = collect_course_entries(
-                    page,
-                    progress=progress,
-                    platform_name=self.platform_name,
-                    deadline=deadline,
-                    max_pages=self.max_course_pages,
-                    max_courses=self.max_courses,
-                )
+                course_entries = collect_course_entries(page)
                 emit_progress(progress, f"{self.platform_name}：发现 {len(course_entries)} 门课程")
                 assignments: list[PlatformAssignment] = []
-                course_errors: list[str] = []
                 for index, course_entry in enumerate(course_entries):
-                    ensure_scan_time_left(deadline, f"扫描课程 {index + 1}/{len(course_entries)}")
                     course_name = course_entry.name
                     emit_progress(
                         progress,
                         f"{self.platform_name}：扫描课程 {index + 1}/{len(course_entries)} {course_name}",
                     )
-                    try:
-                        page.goto(self.url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, self.timeout_ms))
-                        self.wait_until_ready(page)
-                        ensure_student_course_tab(page)
-                        self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
-                        go_to_course_page(page, course_entry.page_number, deadline=deadline)
-                        card = page.locator(".aia_course_card").filter(has_text=course_name).first
-                        if card.count() == 0:
-                            course_errors.append(f"{course_name}: 未找到课程卡片")
-                            continue
-                        card.click(timeout=remaining_timeout_ms(deadline, 8_000))
-                        self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_000)
-                        task_url = task_url_for(page.url)
-                        page.goto(task_url, wait_until="domcontentloaded", timeout=remaining_timeout_ms(deadline, self.timeout_ms))
-                        self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_200)
-                        course_assignments = parse_xiaoya_task_page(
-                            page,
-                            course=course_name,
-                            platform=self.platform_name,
-                            deadline=deadline,
-                        )
-                    except PlaywrightUnavailableError:
-                        raise
-                    except Exception as exc:
-                        course_errors.append(f"{course_name}: {truncate(str(exc), 80)}")
-                        emit_progress(progress, f"{self.platform_name}：跳过课程 {course_name}，原因：{truncate(str(exc), 42)}")
+                    page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                    self.wait_until_ready(page)
+                    ensure_student_course_tab(page)
+                    self.wait_until_ready(page, network_timeout=6_000, settle_ms=600)
+                    go_to_course_page(page, course_entry.page_number)
+                    card = page.locator(".aia_course_card").filter(has_text=course_name).first
+                    if card.count() == 0:
                         continue
+                    card.click(timeout=8_000)
+                    self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_000)
+                    task_url = task_url_for(page.url)
+                    page.goto(task_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                    self.wait_until_ready(page, network_timeout=10_000, settle_ms=1_200)
+                    course_assignments = parse_xiaoya_task_page(
+                        page,
+                        course=course_name,
+                        platform=self.platform_name,
+                    )
                     if course_assignments:
                         emit_progress(progress, f"{self.platform_name}：{course_name} 识别 {len(course_assignments)} 条任务")
                     assignments.extend(course_assignments)
@@ -131,9 +107,6 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                     emit_progress(progress, f"{self.platform_name}：完成，识别 {len(assignments)} 条任务")
                     return assignments
                 if course_entries:
-                    if course_errors:
-                        emit_progress(progress, f"{self.platform_name}：完成，跳过 {len(course_errors)} 门课程，未发现待记录任务")
-                        return []
                     emit_progress(progress, f"{self.platform_name}：完成，未发现待记录任务")
                     return []
                 return self.parse_candidate_blocks(
@@ -143,7 +116,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
             except (LoginRequiredError, PageStructureChangedError):
                 raise
             except playwright_error as exc:
-                raise PlaywrightUnavailableError(f"{self.platform_name} 扫描失败：{exc}") from exc
+                raise PlaywrightUnavailableError(str(exc)) from exc
             finally:
                 context.close()
 
@@ -151,18 +124,6 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 def fetch_assignments(*, headless: bool = True, progress: ProgressCallback = None):
     """Fetch assignments from Xiaoya without submitting anything."""
     return XiaoyaAdapter().fetch_assignments(headless=headless, progress=progress)
-
-
-def ensure_scan_time_left(deadline: float, step: str) -> None:
-    if time.monotonic() >= deadline:
-        raise PlaywrightUnavailableError(f"小雅扫描超时，停在：{step}")
-
-
-def remaining_timeout_ms(deadline: float, default_ms: int) -> int:
-    remaining = int((deadline - time.monotonic()) * 1000)
-    if remaining <= 0:
-        raise PlaywrightUnavailableError("小雅扫描超时")
-    return max(1_000, min(default_ms, remaining))
 
 
 def prefer_student_course_tab(context) -> None:
@@ -204,29 +165,15 @@ def collect_visible_course_names(page) -> list[str]:
     return [entry.name for entry in collect_course_entries(page)]
 
 
-def collect_course_entries(
-    page,
-    *,
-    progress: ProgressCallback = None,
-    platform_name: str = "小雅",
-    deadline: float | None = None,
-    max_pages: int = 30,
-    max_courses: int = 80,
-) -> list[CourseEntry]:
+def collect_course_entries(page) -> list[CourseEntry]:
     entries: list[CourseEntry] = []
     seen: set[str] = set()
     page_number = 1
-    for _ in range(max_pages):
-        if deadline is not None:
-            ensure_scan_time_left(deadline, "读取课程列表")
+    for _ in range(20):
         for name in collect_current_page_course_names(page):
             if name and name not in seen:
                 seen.add(name)
                 entries.append(CourseEntry(name=name, page_number=page_number))
-                if len(entries) >= max_courses:
-                    emit_progress(progress, f"{platform_name}：课程数量达到上限 {max_courses}，停止继续翻页")
-                    return entries
-        emit_progress(progress, f"{platform_name}：读取课程列表第 {page_number} 页，累计 {len(entries)} 门")
         if not click_next_course_page(page):
             break
         page_number += 1
@@ -234,41 +181,18 @@ def collect_course_entries(
 
 
 def collect_current_page_course_names(page) -> list[str]:
-    try:
-        raw_names = page.evaluate(
-            """
-            () => Array.from(document.querySelectorAll('.aia_course_card'))
-              .slice(0, 100)
-              .map(card => card.getAttribute('data-xy-click-pt-name') || card.innerText || '')
-            """
-        )
-    except Exception:
-        raw_names = []
-    names: list[str] = []
-    for text in raw_names:
-        name = extract_course_name(compact_text(str(text)))
-        if name and name not in names:
-            names.append(name)
-    if names:
-        return names
-
     cards = page.locator(".aia_course_card")
     names: list[str] = []
     for index in range(min(cards.count(), 80)):
-        try:
-            text = compact_text(cards.nth(index).inner_text(timeout=500))
-        except Exception:
-            continue
+        text = compact_text(cards.nth(index).inner_text(timeout=1_000))
         name = extract_course_name(text)
         if name and name not in names:
             names.append(name)
     return names
 
 
-def go_to_course_page(page, page_number: int, *, deadline: float | None = None) -> None:
+def go_to_course_page(page, page_number: int) -> None:
     for _ in range(max(0, page_number - 1)):
-        if deadline is not None:
-            ensure_scan_time_left(deadline, f"跳转课程列表第 {page_number} 页")
         if not click_next_course_page(page):
             break
 
@@ -336,19 +260,10 @@ def task_url_for(url: str) -> str:
     return url.rstrip("/") + "/task"
 
 
-def parse_xiaoya_task_page(
-    page,
-    *,
-    course: str,
-    platform: str,
-    deadline: float | None = None,
-    max_pages: int = 20,
-) -> list[PlatformAssignment]:
+def parse_xiaoya_task_page(page, *, course: str, platform: str) -> list[PlatformAssignment]:
     assignments = collect_visible_task_rows(page, course=course, platform=platform)
-    for _ in range(max_pages):
-        if deadline is not None:
-            ensure_scan_time_left(deadline, "读取任务列表")
-        if not click_next_task_page(page, deadline=deadline):
+    for _ in range(20):
+        if not click_next_task_page(page):
             break
         assignments.extend(collect_visible_task_rows(page, course=course, platform=platform))
     if assignments:
@@ -362,8 +277,8 @@ def parse_xiaoya_task_page(
 
 
 def collect_visible_task_rows(page, *, course: str, platform: str) -> list[PlatformAssignment]:
-    assignments: list[PlatformAssignment] = []
     rows = page.locator("tbody tr")
+    assignments: list[PlatformAssignment] = []
     for index in range(min(rows.count(), 200)):
         row = rows.nth(index)
         cells = row.locator("td")
@@ -377,16 +292,13 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
     return assignments
 
 
-def click_next_task_page(page, *, deadline: float | None = None) -> bool:
-    if deadline is not None:
-        ensure_scan_time_left(deadline, "任务列表翻页")
+def click_next_task_page(page) -> bool:
     next_button = page.locator(".ant-pagination-next:not(.ant-pagination-disabled)").first
     if next_button.count() == 0:
         return False
     before = visible_row_signature(page)
     try:
-        timeout = 3_000 if deadline is None else remaining_timeout_ms(deadline, 3_000)
-        next_button.click(timeout=timeout)
+        next_button.click(timeout=3_000)
     except Exception:
         return False
     wait_for_task_page_update(page, before)
