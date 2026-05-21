@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+import time as monotonic_time
 from datetime import datetime, time
+from pathlib import Path
 
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.config_loader import KnownCourseConfig
+from homework_watcher.settings import Settings, load_settings, resolve_path
 from homework_watcher.status import normalize_status
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 XIAOYA_PLATFORM_LABEL = "小雅"
@@ -125,6 +129,62 @@ def sanitize_snapshot(value: str) -> str:
 class XiaoyaScanner:
     platform_key = "xiaoya"
 
+    def __init__(self, settings: Settings | None = None, *, headless: bool = True) -> None:
+        self.settings = settings or load_settings()
+        self.headless = headless
+
+    @property
+    def profile_dir(self) -> Path:
+        return resolve_path(self.settings.playwright_user_data_dir) / "xiaoya"
+
+    def scan(self, context) -> list[AssignmentCandidate]:
+        config = context.platform_config
+        if config is None or not config.enabled:
+            context.emit(5, "小雅：未启用，跳过")
+            return []
+        if not config.known_courses:
+            context.emit(5, "小雅：没有配置 known_courses，跳过")
+            return []
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        context.emit(10, "小雅：打开浏览器登录态")
+        results: list[AssignmentCandidate] = []
+        with sync_playwright() as playwright:
+            browser_context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.profile_dir),
+                headless=self.headless,
+                viewport={"width": 1400, "height": 1000},
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+                for index, course in enumerate(config.known_courses, start=1):
+                    percent = 15 + int(index / max(len(config.known_courses), 1) * 70)
+                    context.emit(percent, f"小雅：扫描 known course {index}/{len(config.known_courses)} {course.course}")
+                    try:
+                        results.extend(self.scan_known_course_page(page, course, course_timeout_seconds=30))
+                    except Exception as exc:  # noqa: BLE001 - one course must not block the platform.
+                        context.emit(percent, f"小雅：课程 {course.course} 失败，已跳过：{type(exc).__name__}: {exc}")
+                context.emit(88, f"小雅：完成，识别 {len(results)} 条")
+                return results
+            finally:
+                browser_context.close()
+
+    def scan_known_course_page(
+        self, page: Page, course: KnownCourseConfig, *, course_timeout_seconds: int
+    ) -> list[AssignmentCandidate]:
+        deadline = monotonic_time.monotonic() + course_timeout_seconds
+        page.goto(course.task_url, wait_until="domcontentloaded", timeout=min(10000, course_timeout_seconds * 1000))
+        remaining_ms = max(1000, int((deadline - monotonic_time.monotonic()) * 1000))
+        page.wait_for_function(
+            "() => document.body && document.body.innerText && document.body.innerText.length > 20",
+            timeout=min(10000, remaining_ms),
+        )
+        text = read_visible_text(page)
+        if looks_like_login_page(text):
+            raise RuntimeError("小雅登录态可能失效，请先运行 login-xiaoya 手动登录")
+        return self.scan_known_course_text(course, text)
+
     def scan_known_course_text(self, course: KnownCourseConfig, text: str) -> list[AssignmentCandidate]:
         return parse_xiaoya_task_text(
             text,
@@ -132,3 +192,41 @@ class XiaoyaScanner:
             task_url=course.task_url,
             course_id=course.course_id,
         )
+
+
+def read_visible_text(page: Page) -> str:
+    try:
+        return str(page.locator("body").inner_text(timeout=5000))
+    except PlaywrightTimeoutError:
+        return str(page.evaluate("() => document.body ? document.body.innerText : ''"))
+
+
+def looks_like_login_page(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return True
+    login_markers = ("登录", "统一身份认证", "验证码", "账号", "密码")
+    task_markers = ("作业任务", "全部任务", "课程内容")
+    return any(marker in compact for marker in login_markers) and not any(
+        marker in compact for marker in task_markers
+    )
+
+
+def login_xiaoya(settings: Settings | None = None) -> None:
+    active_settings = settings or load_settings()
+    profile_dir = resolve_path(active_settings.playwright_user_data_dir) / "xiaoya"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=False,
+            viewport={"width": 1400, "height": 1000},
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto("https://nankai.ai-augmented.com/app/jx-web/mycourse", wait_until="domcontentloaded")
+            print("已打开小雅登录页。请在浏览器中手动登录；程序不会读取、保存或提交你的密码。")
+            input("登录完成后按回车关闭浏览器并保存本地登录态。")
+        finally:
+            context.close()

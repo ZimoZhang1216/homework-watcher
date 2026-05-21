@@ -19,6 +19,7 @@ from .database import (
 from .git_utils import git_commit
 from .logging_utils import get_scan_logger
 from .scanners import FakeScanner, PlatformScanner, ScannerContext
+from .scanners.xiaoya import XiaoyaScanner
 from .settings import Settings, load_settings
 
 
@@ -62,7 +63,10 @@ class ScanService:
         self.configs = load_platform_configs(self.settings.config_path)
         self.logger = get_scan_logger(self.settings)
         self.session_factory = create_session_factory(self.settings)
-        self.scanners = {scanner.platform_key: scanner for scanner in (scanners or [FakeScanner()])}
+        self.scanners = {
+            scanner.platform_key: scanner
+            for scanner in (scanners or [FakeScanner(), XiaoyaScanner(self.settings)])
+        }
 
     def run_scan(self, platforms: list[str] | None = None, progress=None) -> ScanResult:
         init_db(self.settings)

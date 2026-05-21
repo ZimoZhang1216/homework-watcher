@@ -7,6 +7,7 @@ from .app import app
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments
 from .git_utils import git_commit
 from .scan_service import ScanService
+from .scanners.xiaoya import login_xiaoya
 from .settings import load_settings
 
 
@@ -23,6 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser = subparsers.add_parser("scan", help="执行统一扫描服务")
     scan_parser.add_argument("--platform", action="append", dest="platforms", help="限制扫描平台，可重复")
     scan_parser.set_defaults(handler=cmd_scan)
+
+    login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
+    login_xiaoya_parser.set_defaults(handler=cmd_login_xiaoya)
 
     args = parser.parse_args(argv)
     if not hasattr(args, "handler"):
@@ -64,6 +68,11 @@ def cmd_scan(args) -> int:
     result = ScanService(settings).run_scan(platforms=args.platforms)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if not result.errors else 1
+
+
+def cmd_login_xiaoya(_args) -> int:
+    login_xiaoya(load_settings())
+    return 0
 
 
 __all__ = ["app", "main"]
