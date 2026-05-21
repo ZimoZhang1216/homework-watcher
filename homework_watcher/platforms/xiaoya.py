@@ -22,6 +22,12 @@ from .base import (
 from ..datetime_utils import find_datetime
 
 
+FULL_DATETIME_RE = re.compile(
+    r"20\d{2}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*(?:日)?\s+"
+    r"\d{1,2}\s*[:：]\s*\d{1,2}(?:\s*[:：]\s*\d{1,2})?"
+)
+
+
 @dataclass(frozen=True)
 class CourseEntry:
     name: str
@@ -277,8 +283,15 @@ def parse_xiaoya_task_page(page, *, course: str, platform: str) -> list[Platform
 
 
 def collect_visible_task_rows(page, *, course: str, platform: str) -> list[PlatformAssignment]:
-    rows = page.locator("tbody tr")
     assignments: list[PlatformAssignment] = []
+    for cell_texts in evaluate_task_table_rows(page):
+        item = parse_xiaoya_row(cell_texts, course=course, platform=platform, url=page.url)
+        if item is not None:
+            assignments.append(item)
+    if assignments:
+        return dedupe_assignments(assignments)
+
+    rows = page.locator("tbody tr")
     for index in range(min(rows.count(), 200)):
         row = rows.nth(index)
         cells = row.locator("td")
@@ -290,6 +303,60 @@ def collect_visible_task_rows(page, *, course: str, platform: str) -> list[Platf
         if item is not None:
             assignments.append(item)
     return assignments
+
+
+def evaluate_task_table_rows(page) -> list[list[str]]:
+    try:
+        raw_rows = page.evaluate(
+            """
+            () => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const cells = Array.from(document.querySelectorAll('.ant-table tbody tr:not(.ant-table-measure-row) td, table tbody tr td'))
+                .map(cell => {
+                  const rect = cell.getBoundingClientRect();
+                  return {
+                    text: compact(cell.innerText || cell.textContent),
+                    top: Math.round((rect.top + rect.height / 2) / 4) * 4,
+                    left: Math.round(rect.left),
+                    width: rect.width,
+                    height: rect.height,
+                  };
+                })
+                .filter(cell => cell.text && cell.width > 0 && cell.height > 0);
+              const groups = new Map();
+              for (const cell of cells) {
+                if (!groups.has(cell.top)) groups.set(cell.top, []);
+                groups.get(cell.top).push(cell);
+              }
+              return Array.from(groups.values())
+                .map(row => row.sort((a, b) => a.left - b.left).map(cell => cell.text))
+                .filter(row => row.length >= 4);
+            }
+            """
+        )
+    except Exception:
+        return []
+    rows: list[list[str]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, list):
+            continue
+        cells = [compact_text(str(cell)) for cell in raw if compact_text(str(cell))]
+        cells = collapse_duplicate_cells(cells)
+        if cells:
+            rows.append(cells)
+    return rows
+
+
+def collapse_duplicate_cells(cells: list[str]) -> list[str]:
+    collapsed: list[str] = []
+    for cell in cells:
+        if collapsed and collapsed[-1] == cell:
+            continue
+        collapsed.append(cell)
+    half = len(collapsed) // 2
+    if half and collapsed[:half] == collapsed[half:]:
+        return collapsed[:half]
+    return collapsed
 
 
 def click_next_task_page(page) -> bool:
@@ -349,11 +416,10 @@ def parse_xiaoya_row(
     if len(cells) < 4:
         return None
     joined = "\n".join(cells)
-    due_source = cells[8] if len(cells) > 8 and cells[8].strip() else joined
-    due_at = find_datetime(due_source)
+    due_at = find_xiaoya_row_due(cells)
     if due_at is None:
         return None
-    title = first_nonempty(cells)
+    title = title_from_xiaoya_row(cells)
     if not title or title in {"标题", "老师还没有发布任务，敬请期待吧！"}:
         return None
     status = guess_row_status(cells)
@@ -364,6 +430,64 @@ def parse_xiaoya_row(
         due_at=due_at,
         status=status,
         url=url,
+    )
+
+
+def find_xiaoya_row_due(cells: list[str]):
+    joined = "\n".join(cells)
+    dates = [find_datetime(match.group(0)) for match in FULL_DATETIME_RE.finditer(joined)]
+    dates = [value for value in dates if value is not None]
+    if len(dates) >= 2:
+        return dates[-1]
+    if len(cells) > 8 and cells[8].strip():
+        due_at = find_datetime(cells[8])
+        if due_at is not None:
+            return due_at
+    if re.search(r"截止|到期|结束|deadline|due", joined, re.IGNORECASE):
+        return find_datetime(joined)
+    return dates[-1] if dates else None
+
+
+def title_from_xiaoya_row(cells: list[str]) -> str:
+    for cell in cells:
+        value = compact_text(cell)
+        if not value or looks_like_xiaoya_metadata(value):
+            continue
+        if find_datetime(value) is not None:
+            continue
+        return value
+    return first_nonempty(cells)
+
+
+def looks_like_xiaoya_metadata(value: str) -> bool:
+    return bool(
+        value in {
+            "\\",
+            "/",
+            "|",
+            "标题",
+            "位置",
+            "任务类型",
+            "状态",
+            "发布方式",
+            "分配对象",
+            "发布时间",
+            "开始时间",
+            "截止时间",
+            "操作",
+            "作业",
+            "测验",
+            "问卷",
+            "讨论",
+            "自主观看",
+            "课堂练习",
+            "全体",
+            "班级",
+            "个人",
+            "小组",
+            "进入任务",
+        }
+        or re.search(r"已完成|已提交|已批改|进行中|未完成|未提交|待完成|未开始|未开放", value)
     )
 
 
@@ -378,7 +502,7 @@ def guess_row_status(cells: list[str]) -> str:
     joined = " ".join(cells)
     if "未开始" in joined or "未开放" in joined or "未到开始时间" in joined:
         return "不可完成的作业"
-    if "未提交" in joined or "待完成" in joined or "未完成" in joined:
+    if "未提交" in joined or "待完成" in joined or "未完成" in joined or "进行中" in joined:
         return "未提交"
     if "已提交" in joined or "已完成" in joined or "已批改" in joined:
         return "已提交"

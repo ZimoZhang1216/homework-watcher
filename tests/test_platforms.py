@@ -126,6 +126,53 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(task_url_for("https://example.test/mycourse/1/resource/last"), "https://example.test/mycourse/1/task")
         self.assertEqual(task_url_for("https://example.test/mycourse/1/task/last"), "https://example.test/mycourse/1/task")
 
+    def test_parse_xiaoya_structure_chemistry_running_row(self):
+        item = parse_xiaoya_row(
+            [
+                "实习2 点阵理论",
+                "\\",
+                "作业",
+                "进行中",
+                "全体",
+                "全体",
+                "2026-05-06 10:07:10",
+                "2026-05-15 00:06:53",
+                "2026-05-22 23:59:59",
+                "进入任务",
+            ],
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+        )
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.title, "实习2 点阵理论")
+        self.assertEqual(item.status, "未提交")
+        self.assertEqual(item.due_at, datetime(2026, 5, 22, 23, 59))
+
+    def test_parse_xiaoya_row_uses_last_datetime_when_columns_are_split(self):
+        item = parse_xiaoya_row(
+            [
+                "作业-08",
+                "\\",
+                "作业",
+                "进行中",
+                "全体",
+                "全体",
+                "2026-05-06 10:05:48",
+                "2026-05-06 10:10:14",
+                "进入任务",
+                "2026-05-22 23:59:59",
+            ],
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+        )
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item.title, "作业-08")
+        self.assertEqual(item.due_at, datetime(2026, 5, 22, 23, 59))
+
     def test_xiaoya_unavailable_status(self):
         item = parse_xiaoya_row(
             [
