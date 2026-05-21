@@ -1,0 +1,21 @@
+[Unit]
+Description=homework-watcher v2 web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/homework-watcher-v2
+EnvironmentFile=/etc/homework-watcher-v2.env
+ExecStart=/opt/homework-watcher-v2/.venv/bin/python -m homework_watcher.app
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+# Production hardening can be tightened after a non-root user and writable data
+# directories are provisioned. For a first ECS deployment, root is acceptable
+# if the instance is otherwise locked down by security groups and SSH policy.
+User=root
+
+[Install]
+WantedBy=multi-user.target
