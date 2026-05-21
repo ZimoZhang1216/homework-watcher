@@ -30,6 +30,7 @@ class Phase2DatabaseTests(unittest.TestCase):
         self.assertEqual(normalize_status("未开始"), "pending")
         self.assertEqual(normalize_status("已完成"), "completed")
         self.assertEqual(normalize_status("已截止"), "expired")
+        self.assertEqual(normalize_status("未完成"), "in_progress")
         self.assertEqual(normalize_status(""), "unknown")
 
     def test_upsert_and_todo_query(self) -> None:

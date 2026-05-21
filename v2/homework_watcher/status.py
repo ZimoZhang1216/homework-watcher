@@ -22,7 +22,7 @@ def normalize_status(value: str | None) -> str:
     text = clean_status_text(value)
     if not text:
         return STATUS_UNKNOWN
-    if any(marker in text for marker in ("已完成", "已提交", "已批阅", "完成")):
+    if any(marker in text for marker in ("已完成", "已提交", "已批阅")):
         return STATUS_COMPLETED
     if "已截止" in text or "逾期" in text:
         return STATUS_EXPIRED
