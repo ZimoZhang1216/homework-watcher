@@ -45,11 +45,12 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.17"
+APP_VERSION = "V-1.18"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
 LOGIN_SESSION_TTL_SECONDS = int(os.environ.get("HW_WEB_LOGIN_SESSION_TTL_SECONDS", "1800"))
+LOGIN_SESSION_START_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_LOGIN_START_TIMEOUT_SECONDS", "60"))
 WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "900"))
 JobProgress = Callable[[str, int | None], None]
 
@@ -288,11 +289,18 @@ class LoginSessionManager:
         adapter = adapter_class(profile_root=user_browser_profile_root(user.id))
         await self.close_expired()
         with self.lock:
+            self._clear_expired_starting_locked()
             if self.active is not None and self.active["user_id"] == user.id:
                 return
             if self.active is not None or self.starting is not None:
                 raise RuntimeError("已有同学正在远程浏览器中登录。请稍后再试。")
-            self.starting = {"user_id": user.id, "platform": adapter.platform_name}
+            self.starting = {
+                "user_id": user.id,
+                "email": user.email,
+                "platform": adapter.platform_name,
+                "started_at": timestamp_now(),
+                "started_monotonic": time.monotonic(),
+            }
         async_playwright, playwright_error = load_async_playwright_for_web()
         playwright = None
         context = None
@@ -350,6 +358,13 @@ class LoginSessionManager:
             active = self._pop_active_locked()
         await self._close_active(active)
 
+    async def force_release(self) -> None:
+        with self.lock:
+            self.starting = None
+            active = self._pop_active_locked() if self.active is not None else None
+        if active is not None:
+            await self._close_active(active)
+
     async def close_expired(self) -> None:
         with self.lock:
             if self.active is None or not self._active_is_expired_locked():
@@ -359,8 +374,16 @@ class LoginSessionManager:
 
     def status_for(self, *, user_id: int) -> dict | None:
         with self.lock:
+            self._clear_expired_starting_locked()
             if self.active is None:
-                return None
+                if self.starting is None:
+                    return None
+                visible = dict(self.starting)
+                visible["slug"] = ""
+                visible["owned_by_current_user"] = visible["user_id"] == user_id
+                visible["expires_in_seconds"] = self._starting_expires_in_seconds_locked()
+                visible["starting"] = True
+                return visible
             visible = dict(self.active)
             visible.pop("playwright", None)
             visible.pop("context", None)
@@ -368,6 +391,7 @@ class LoginSessionManager:
             visible.pop("started_monotonic", None)
             visible["owned_by_current_user"] = visible["user_id"] == user_id
             visible["expires_in_seconds"] = self._expires_in_seconds_locked()
+            visible["starting"] = False
             return visible
 
     def _active_is_expired_locked(self) -> bool:
@@ -378,6 +402,16 @@ class LoginSessionManager:
             return 0
         started = float(self.active.get("started_monotonic", time.monotonic()))
         return max(0, int(LOGIN_SESSION_TTL_SECONDS - (time.monotonic() - started)))
+
+    def _starting_expires_in_seconds_locked(self) -> int:
+        if self.starting is None:
+            return 0
+        started = float(self.starting.get("started_monotonic", time.monotonic()))
+        return max(0, int(LOGIN_SESSION_START_TIMEOUT_SECONDS - (time.monotonic() - started)))
+
+    def _clear_expired_starting_locked(self) -> None:
+        if self.starting is not None and self._starting_expires_in_seconds_locked() <= 0:
+            self.starting = None
 
     def _pop_active_locked(self) -> dict:
         active = self.active
@@ -452,7 +486,10 @@ def create_app():
     @app.post("/platform-login/{platform}")
     async def platform_login(request: Request, platform: str):
         user = require_user(request, store)
-        await login_manager.start(user=user, platform=platform)
+        try:
+            await login_manager.start(user=user, platform=platform)
+        except RuntimeError as exc:
+            return remote_login_conflict_page(request, user, login_manager, str(exc))
         return RedirectResponse("/remote-login", status_code=303)
 
     @app.get("/remote-login", response_class=HTMLResponse)
@@ -470,6 +507,12 @@ def create_app():
     async def cancel_remote_login(request: Request):
         user = require_user(request, store)
         await login_manager.finish(user_id=user.id)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/remote-login/force-release")
+    async def force_release_remote_login(request: Request):
+        require_user(request, store)
+        await login_manager.force_release()
         return RedirectResponse("/", status_code=303)
 
     @app.post("/assignments/{assignment_id}/done")
@@ -629,7 +672,28 @@ def remote_login_page(request: Request, user: WebUser, login_manager: LoginSessi
     if active is None:
         return page("远程登录", message_page("没有远程登录会话", "请从首页选择一个平台开始登录。"))
     if not active["owned_by_current_user"]:
-        return page("远程登录占用中", message_page("远程登录占用中", "已有其他同学正在登录，请稍后再试。"), status_code=409)
+        return remote_login_conflict_page(request, user, login_manager, "已有同学正在远程浏览器中登录。请稍后再试。")
+    if active.get("starting"):
+        expires_in = int(active.get("expires_in_seconds", 0))
+        return page(
+            "远程浏览器启动中",
+            f"""
+            <section class="remote-shell">
+              <div>
+                <p class="eyebrow">Remote Login</p>
+                <h1>远程浏览器启动中</h1>
+                <p class="lede">正在启动：{escape(active['platform'])}。如果长时间无响应，可以释放本次会话后重试。</p>
+              </div>
+              <div class="form-panel">
+                <p><span class="field-label">自动释放</span>{escape(str(expires_in))} 秒</p>
+                <div class="actions vertical">
+                  <form method="post" action="/remote-login/force-release"><button type="submit" class="secondary">释放远程浏览器会话</button></form>
+                  <p><a class="inline-link" href="/">返回首页</a></p>
+                </div>
+              </div>
+            </section>
+            """,
+        )
     expires_in = int(active.get("expires_in_seconds", 0))
     expires_text = f"{max(1, (expires_in + 59) // 60)} 分钟内未完成会自动释放"
     novnc_url = build_novnc_url(request)
@@ -655,6 +719,50 @@ def remote_login_page(request: Request, user: WebUser, login_manager: LoginSessi
           </div>
         </section>
         """,
+    )
+
+
+def remote_login_conflict_page(
+    request: Request,
+    user: WebUser,
+    login_manager: LoginSessionManager,
+    message: str,
+):
+    active = login_manager.status_for(user_id=user.id)
+    details = ""
+    if active is not None:
+        owner = "你自己" if active.get("owned_by_current_user") else active.get("email", "其他同学")
+        remaining = int(active.get("expires_in_seconds", 0))
+        remaining_text = f"{remaining} 秒" if active.get("starting") else f"{max(1, (remaining + 59) // 60)} 分钟"
+        state = "正在启动" if active.get("starting") else "正在登录"
+        details = (
+            f"<p><span class='field-label'>占用者</span>{escape(str(owner))}</p>"
+            f"<p><span class='field-label'>平台</span>{escape(str(active.get('platform', '未知')))}</p>"
+            f"<p><span class='field-label'>状态</span>{escape(state)}</p>"
+            f"<p><span class='field-label'>自动释放</span>{escape(remaining_text)}</p>"
+        )
+    else:
+        details = "<p class='muted-text'>当前没有可见的远程登录会话，可能是启动锁刚刚过期。</p>"
+    return page(
+        "远程登录占用中",
+        f"""
+        <section class="remote-shell">
+          <div>
+            <p class="eyebrow">Remote Login</p>
+            <h1>远程登录占用中</h1>
+            <p class="lede">{escape(message)}</p>
+          </div>
+          <div class="form-panel">
+            {details}
+            <p class="muted-text">如果远程浏览器已经卡住或上一次没有正常关闭，可以释放会话后重新打开平台登录。</p>
+            <div class="actions vertical">
+              <form method="post" action="/remote-login/force-release"><button type="submit" class="secondary">释放远程浏览器会话</button></form>
+              <p><a class="inline-link" href="/">返回首页</a></p>
+            </div>
+          </div>
+        </section>
+        """,
+        status_code=409,
     )
 
 

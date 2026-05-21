@@ -360,6 +360,100 @@ class WebAppTest(unittest.TestCase):
         self.assertTrue(context.closed)
         self.assertTrue(playwright.stopped)
 
+    def test_platform_login_manager_exposes_and_expires_starting_lock(self):
+        manager = LoginSessionManager()
+        manager.starting = {
+            "user_id": 2,
+            "email": "other@example.com",
+            "platform": "小雅",
+            "started_at": "2026-05-21 09:00:00",
+            "started_monotonic": web_app.time.monotonic(),
+        }
+
+        visible = manager.status_for(user_id=1)
+        self.assertIsNotNone(visible)
+        self.assertTrue(visible["starting"])
+        self.assertFalse(visible["owned_by_current_user"])
+        self.assertEqual(visible["email"], "other@example.com")
+
+        with manager.lock:
+            manager.starting["started_monotonic"] -= web_app.LOGIN_SESSION_START_TIMEOUT_SECONDS + 1
+
+        self.assertIsNone(manager.status_for(user_id=1))
+
+    def test_platform_login_conflict_page_can_force_release(self):
+        manager = LoginSessionManager()
+        manager.starting = {
+            "user_id": 2,
+            "email": "other@example.com",
+            "platform": "小雅",
+            "started_at": "2026-05-21 09:00:00",
+            "started_monotonic": web_app.time.monotonic(),
+        }
+        user = WebUser(
+            id=1,
+            email="demo@example.com",
+            report_email="demo@example.com",
+            created_at="2026-05-18 08:00:00",
+        )
+
+        response = web_app.remote_login_conflict_page(None, user, manager, "已有同学正在远程浏览器中登录。")
+        html = response.body.decode("utf-8")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("远程登录占用中", html)
+        self.assertIn("other@example.com", html)
+        self.assertIn("/remote-login/force-release", html)
+        self.assertIn("释放远程浏览器会话", html)
+
+    def test_platform_login_manager_force_release_closes_active_session(self):
+        class FakeContext:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        class FakePlaywright:
+            def __init__(self):
+                self.stopped = False
+
+            async def stop(self):
+                self.stopped = True
+
+        async def run_case():
+            manager = LoginSessionManager()
+            context = FakeContext()
+            playwright = FakePlaywright()
+            manager.starting = {
+                "user_id": 2,
+                "email": "other@example.com",
+                "platform": "小雅",
+                "started_at": "2026-05-21 09:00:00",
+                "started_monotonic": web_app.time.monotonic(),
+            }
+            manager.active = {
+                "user_id": 2,
+                "email": "other@example.com",
+                "platform": "小雅",
+                "slug": "xiaoya",
+                "started_at": "2026-05-21 09:00:00",
+                "started_monotonic": web_app.time.monotonic(),
+                "context": context,
+                "playwright": playwright,
+                "playwright_error": Exception,
+            }
+
+            await manager.force_release()
+            return manager, context, playwright
+
+        manager, context, playwright = asyncio.run(run_case())
+
+        self.assertIsNone(manager.starting)
+        self.assertIsNone(manager.active)
+        self.assertTrue(context.closed)
+        self.assertTrue(playwright.stopped)
+
     def test_platform_login_manager_reuses_and_expires_sessions(self):
         class FakePage:
             async def goto(self, *args, **kwargs):
