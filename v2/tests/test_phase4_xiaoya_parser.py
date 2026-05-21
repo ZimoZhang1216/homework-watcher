@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from homework_watcher.scanners.xiaoya import parse_xiaoya_task_text
+from homework_watcher.scanners.xiaoya import MAX_XIAOYA_PAGES, parse_xiaoya_due_at, parse_xiaoya_task_text
 
 
 STRUCTURE_TEXT = """
@@ -54,6 +54,12 @@ class Phase4XiaoyaParserTests(unittest.TestCase):
             task_url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398",
         )
         self.assertEqual(assignments, [])
+
+    def test_date_only_defaults_to_end_of_day(self) -> None:
+        self.assertEqual(parse_xiaoya_due_at("2026-05-22").isoformat(sep=" "), "2026-05-22 23:59:59")
+
+    def test_pagination_has_hard_upper_bound(self) -> None:
+        self.assertEqual(MAX_XIAOYA_PAGES, 20)
 
 
 if __name__ == "__main__":
