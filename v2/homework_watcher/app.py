@@ -4,11 +4,13 @@ from datetime import datetime
 from html import escape
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .database import assignment_to_dict, create_session_factory, init_db, list_todos
+from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
 from .git_utils import git_commit
+from .logging_utils import read_latest_scan_log
+from .scan_service import ScanService, latest_scan_result
 from .settings import load_settings
 
 
@@ -42,6 +44,89 @@ def create_app() -> FastAPI:
                     <span class="count">{len(todos)}</span>
                   </div>
                   {render_assignment_table(todos)}
+                  <div class="actions">
+                    <form method="post" action="/scan?redirect=1">
+                      <button type="submit">立即扫描</button>
+                    </form>
+                    <a class="button-link" href="/logs/latest">查看最近扫描日志</a>
+                    <a class="button-link" href="/assignments">查看所有记录</a>
+                  </div>
+                </section>
+                """,
+                settings=settings,
+            )
+        )
+
+    @app.post("/scan")
+    def scan(redirect: bool = Query(False)):
+        result = ScanService(settings).run_scan()
+        if redirect:
+            return RedirectResponse("/", status_code=303)
+        return result.to_dict()
+
+    @app.get("/api/todos")
+    def api_todos():
+        with session_factory() as session:
+            return [assignment_to_dict(item) for item in list_todos(session)]
+
+    @app.get("/api/assignments")
+    def api_assignments(
+        platform: str | None = None,
+        course: str | None = None,
+        status: str | None = None,
+    ):
+        with session_factory() as session:
+            items = [assignment_to_dict(item) for item in list_assignments(session)]
+        if platform:
+            items = [item for item in items if item["platform"] == platform]
+        if course:
+            items = [item for item in items if item["course"] == course]
+        if status:
+            items = [
+                item
+                for item in items
+                if item["status_raw"] == status or item["status_normalized"] == status
+            ]
+        return items
+
+    @app.get("/api/scans/latest")
+    def api_latest_scan():
+        result = latest_scan_result()
+        return result.to_dict() if result else {"scan": None}
+
+    @app.get("/assignments", response_class=HTMLResponse)
+    def assignments_page():
+        with session_factory() as session:
+            items = [assignment_to_dict(item) for item in list_assignments(session)]
+        return HTMLResponse(
+            render_page(
+                "所有记录",
+                f"""
+                <section class="panel">
+                  <div class="panel-title">
+                    <h2>所有记录</h2>
+                    <span class="count">{len(items)}</span>
+                  </div>
+                  {render_assignment_table(items)}
+                  <div class="actions"><a class="button-link" href="/">返回待办</a></div>
+                </section>
+                """,
+                settings=settings,
+            )
+        )
+
+    @app.get("/logs/latest", response_class=HTMLResponse)
+    def latest_logs_page():
+        lines = read_latest_scan_log(settings)
+        content = "\n".join(escape(line) for line in lines) or "暂无扫描日志。"
+        return HTMLResponse(
+            render_page(
+                "最近扫描日志",
+                f"""
+                <section class="panel">
+                  <h2>最近扫描日志</h2>
+                  <pre>{content}</pre>
+                  <div class="actions"><a class="button-link" href="/">返回待办</a></div>
                 </section>
                 """,
                 settings=settings,
@@ -100,6 +185,10 @@ def render_page(title: str, body: str, *, settings) -> str:
     th, td {{ text-align: left; padding: 12px 10px; border-top: 1px solid #e2e6df; vertical-align: top; }}
     th {{ color: #66736d; font-size: 14px; }}
     a {{ color: #145f45; }}
+    button, .button-link {{ display: inline-flex; align-items: center; min-height: 42px; border: 1px solid #1f6b4b; background: #1f6b4b; color: #fff; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }}
+    .button-link {{ background: #fff; color: #1f6b4b; }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; background: #f2f4ef; border-radius: 6px; padding: 16px; max-height: 560px; overflow: auto; }}
     footer {{ margin-top: 32px; color: #66736d; font-size: 14px; }}
   </style>
 </head>
