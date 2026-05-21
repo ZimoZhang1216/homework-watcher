@@ -11,6 +11,7 @@ from homework_watcher.platforms.base import CandidateBlock, looks_like_empty_sta
 from homework_watcher.platforms.xiaoya import (
     XiaoyaAdapter,
     collect_current_page_course_names,
+    parse_xiaoya_task_text,
     parse_xiaoya_row,
     task_url_for,
     xiaoya_text_is_loading,
@@ -31,7 +32,7 @@ class PlatformAdapterTests(unittest.TestCase):
         adapter = XiaoyaAdapter()
 
         self.assertLessEqual(adapter.course_timeout_seconds, 60)
-        self.assertLessEqual(adapter.max_task_pages, 5)
+        self.assertGreaterEqual(adapter.max_task_pages, 17)
         self.assertGreaterEqual(adapter.max_courses, 14)
 
     def test_xiaoya_loading_text_is_detected(self):
@@ -166,6 +167,28 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(item.title, "实习2 点阵理论")
         self.assertEqual(item.status, "未提交")
         self.assertEqual(item.due_at, datetime(2026, 5, 22, 23, 59))
+
+    def test_parse_xiaoya_structure_chemistry_text_snapshot(self):
+        items = parse_xiaoya_task_text(
+            """
+            标题
+            位置
+            任务类型
+            状态
+            作业-08 \\ 作业 进行中 全体 全体 2026-05-06 10:05:48 2026-05-06 10:10:14
+            2026-05-22 23:59:59
+            进入任务
+            实习2 点阵理论 \\ 作业 进行中 全体 全体 2026-05-06 10:07:10 2026-05-15 00:06:53
+            2026-05-22 23:59:59
+            进入任务
+            """,
+            course="结构化学",
+            platform="小雅",
+            url="https://example.test/task",
+        )
+
+        self.assertEqual([item.title for item in items], ["作业-08", "实习2 点阵理论"])
+        self.assertTrue(all(item.status == "未提交" for item in items))
 
     def test_parse_xiaoya_row_uses_last_datetime_when_columns_are_split(self):
         item = parse_xiaoya_row(
