@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
+import json
+import logging
 import os
 import re
 import secrets
@@ -10,6 +13,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
@@ -40,6 +44,7 @@ from .platforms.base import (
     format_playwright_error,
 )
 from .platforms.xiaoya import xiaoya_text_is_loading
+from .platforms.xiaoya import looks_like_course_summary_assignment
 from .recurring_assignments import materialize_recurring_assignments
 from .statuses import assignment_is_done, platform_status_is_done
 
@@ -47,7 +52,7 @@ from .statuses import assignment_is_done, platform_status_is_done
 WEB_DIR = Path(os.environ.get("HW_WEB_DIR", APP_DIR / "web")).expanduser()
 WEB_DB_PATH = Path(os.environ.get("HW_WEB_DB_PATH", WEB_DIR / "web.db")).expanduser()
 SESSION_COOKIE = "homework_watcher_session"
-APP_VERSION = "V-1.22"
+APP_VERSION = "V-1.23"
 NOVNC_WEBSOCKET_PATH = "vnc/websockify"
 SESSION_DAYS = 30
 PASSWORD_ITERATIONS = 260_000
@@ -56,6 +61,7 @@ LOGIN_SESSION_START_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_LOGIN_START_TIM
 WEB_JOB_TIMEOUT_SECONDS = int(os.environ.get("HW_WEB_JOB_TIMEOUT_SECONDS", "900"))
 CHROMIUM_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 JobProgress = Callable[[str, int | None], None]
+SCAN_LOGGER = logging.getLogger("homework_watcher.web_scan")
 
 
 class JobCancelled(RuntimeError):
@@ -797,38 +803,115 @@ def normalize_novnc_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query), parts.fragment))
 
 
-def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) -> str:
+def scan_log(scan_id: str, message: str) -> None:
+    line = f"[scan:{scan_id}] {message}"
+    SCAN_LOGGER.info(line)
+    print(line, flush=True)
+
+
+def current_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def assignment_summary_for_log(assignments, *, limit: int = 12) -> str:
+    rows = []
+    for item in list(assignments)[:limit]:
+        due_at = getattr(item, "due_at", "")
+        if isinstance(due_at, datetime):
+            due_at = due_at.strftime("%Y-%m-%d %H:%M:%S")
+        rows.append(
+            {
+                "title": getattr(item, "title", ""),
+                "course": getattr(item, "course", ""),
+                "platform": getattr(item, "platform", ""),
+                "status": getattr(item, "status", ""),
+                "due_at": due_at,
+            }
+        )
+    if len(assignments) > limit:
+        rows.append({"more": len(assignments) - limit})
+    return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+
+
+def scan_user_homework(
+    user: WebUser,
+    *,
+    progress: JobProgress | None = None,
+    scan_request_id: str | None = None,
+) -> str:
+    scan_id = scan_request_id or uuid.uuid4().hex[:12]
     db = HomeworkDB(user_homework_db_path(user.id))
     seen = 0
     written = 0
+    inserted = 0
+    updated = 0
+    skipped = 0
     removed = 0
     errors: list[str] = []
     scanned_items = []
     slugs = canonical_slugs()
-    emit_job_progress(progress, "准备扫描平台", 5)
+
+    def report(message: str, percent: int | None = None) -> None:
+        scan_log(scan_id, f"progress percent={percent} message={message}")
+        emit_job_progress(progress, message, percent)
+
+    scan_log(
+        scan_id,
+        f"web scan started version={APP_VERSION} commit={current_git_commit()} "
+        f"user_id={user.id} db={user_homework_db_path(user.id)} "
+        f"profile_root={user_browser_profile_root(user.id)}",
+    )
+    emit_job_progress(report, "准备扫描平台", 5)
     try:
         for index, slug in enumerate(slugs):
             adapter = ADAPTER_CLASSES[slug](profile_root=user_browser_profile_root(user.id))
             platform_start = 10 + int(index * 75 / max(1, len(slugs)))
             platform_end = 10 + int((index + 1) * 75 / max(1, len(slugs)))
-            emit_job_progress(progress, f"开始扫描 {adapter.platform_name}", platform_start)
+            scan_log(scan_id, f"platform enabled slug={slug} name={adapter.platform_name}")
+            if slug == "xiaoya":
+                scanner_file = inspect.getsourcefile(adapter.__class__) or inspect.getfile(adapter.__class__)
+                scan_log(scan_id, f"xiaoya scanner file={scanner_file}")
+                scan_log(scan_id, f"xiaoya scan function={adapter.fetch_assignments.__qualname__}")
+                scan_log(scan_id, "xiaoya full scan start")
+            emit_job_progress(report, f"开始扫描 {adapter.platform_name}", platform_start)
             try:
                 items = adapter.fetch_assignments(
                     headless=True,
-                    progress=platform_progress_adapter(progress, start=platform_start, end=platform_end),
+                    progress=platform_progress_adapter(report, start=platform_start, end=platform_end),
                 )
             except (LoginRequiredError, PageStructureChangedError, PlaywrightUnavailableError) as exc:
                 errors.append(f"{adapter.platform_name}: {exc}")
-                emit_job_progress(progress, f"{adapter.platform_name} 扫描失败：{exc}", platform_end)
+                scan_log(scan_id, f"{adapter.platform_name} scan failed error={exc}")
+                emit_job_progress(report, f"{adapter.platform_name} 扫描失败：{exc}", platform_end)
                 continue
+            if slug == "xiaoya":
+                scan_log(
+                    scan_id,
+                    f"xiaoya full scan returned count={len(items)} titles={assignment_summary_for_log(items)}",
+                )
             scanned_items.extend(items)
             seen += len(items)
-            emit_job_progress(progress, f"{adapter.platform_name}：完成，识别 {len(items)} 条", platform_end)
-        emit_job_progress(progress, "替换当前待办", 86)
+            emit_job_progress(report, f"{adapter.platform_name}：完成，识别 {len(items)} 条", platform_end)
+        before_filter_count = len(scanned_items)
+        scanned_items = [item for item in scanned_items if not looks_like_course_summary_assignment(item)]
+        skipped += before_filter_count - len(scanned_items)
+        if skipped:
+            scan_log(scan_id, f"filtered course summary assignments skipped={skipped}")
+        scan_log(scan_id, f"before db upsert count={len(scanned_items)} titles={assignment_summary_for_log(scanned_items)}")
+        emit_job_progress(report, "替换当前待办", 86)
         removed = db.delete_pending_assignments()
         for index, item in enumerate(scanned_items):
-            emit_job_progress(progress, f"写入扫描结果 {index + 1}/{len(scanned_items)}", 87)
-            assignment, _ = db.add_assignment(
+            emit_job_progress(report, f"写入扫描结果 {index + 1}/{len(scanned_items)}", 87)
+            assignment, created = db.add_assignment(
                 title=item.title,
                 course=item.course,
                 platform=item.platform,
@@ -836,17 +919,24 @@ def scan_user_homework(user: WebUser, *, progress: JobProgress | None = None) ->
                 status=item.status,
                 url=item.url,
             )
+            if created:
+                inserted += 1
+            else:
+                updated += 1
             if assignment.id is not None and platform_status_is_done(item.status):
                 assignment = db.mark_done(assignment.id)
             written += 1
-        emit_job_progress(progress, "补齐本周固定作业", 90)
+        scan_log(scan_id, f"after db upsert inserted={inserted} updated={updated} skipped={skipped} removed={removed}")
+        emit_job_progress(report, "补齐本周固定作业", 90)
         materialize_recurring_assignments(db, now=now_local(), horizon_days=7)
+        todo_items = db.list_assignments(include_done=False)
+        scan_log(scan_id, f"api response todo count={len(todo_items)} titles={assignment_summary_for_log(todo_items)}")
     finally:
         db.close()
     message = f"扫描完成：识别 {seen} 条，写入 {written} 条，替换旧待办 {removed} 条"
     if errors:
         message += "；部分平台失败：" + "；".join(errors[:2])
-    emit_job_progress(progress, message, 100)
+    emit_job_progress(report, message, 100)
     return message
 
 

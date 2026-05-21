@@ -297,6 +297,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
 
                 assignments: list[PlatformAssignment] = []
                 skipped: list[str] = []
+                emit_progress(progress, f"{self.platform_name}：full scan start")
                 for index, course in enumerate(course_entries):
                     ensure_scan_time_left(deadline, f"扫描课程 {index + 1}/{len(course_entries)}")
                     course_deadline = min(deadline, time.monotonic() + self.course_timeout_seconds)
@@ -335,6 +336,12 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                         emit_progress(progress, f"{self.platform_name}：{course.name} 识别 {len(items)} 条任务")
                     assignments.extend(items)
 
+                full_scan_items = dedupe_assignments(assignments)
+                emit_progress(
+                    progress,
+                    f"{self.platform_name}：full scan returned count={len(full_scan_items)} "
+                    f"titles={assignment_log_summary(full_scan_items)}",
+                )
                 assignments.extend(
                     self._scan_missing_known_course_tasks(
                         page,
@@ -346,6 +353,11 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                     )
                 )
                 assignments = dedupe_assignments(assignments)
+                emit_progress(
+                    progress,
+                    f"{self.platform_name}：merged result count={len(assignments)} "
+                    f"titles={assignment_log_summary(assignments)}",
+                )
                 if assignments:
                     suffix = f"，跳过 {len(skipped)} 门课程" if skipped else ""
                     emit_progress(progress, f"{self.platform_name}：完成，识别 {len(assignments)} 条任务{suffix}")
@@ -375,7 +387,13 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
         fallback_items: list[PlatformAssignment] = []
         for offset, (course_name, course_id) in enumerate(KNOWN_COURSE_IDS.items()):
             current = assignments + fallback_items
-            if has_real_course_assignments(current, course_name):
+            has_real_tasks = has_real_course_assignments(current, course_name)
+            emit_progress(
+                progress,
+                f"{self.platform_name}：structure fallback condition "
+                f"course={course_name} has_real_structure_tasks={str(has_real_tasks).lower()}",
+            )
+            if has_real_tasks:
                 continue
             ensure_scan_time_left(deadline, f"补扫已知课程 {course_name}")
             course_deadline = min(deadline, time.monotonic() + self.course_timeout_seconds)
@@ -385,6 +403,7 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                 task_url=task_url_for_course_id(self.url, course_id),
             )
             emit_progress(progress, f"{self.platform_name}：补扫已知课程 {course_name}")
+            emit_progress(progress, f"{self.platform_name}：structure fallback start url={course.task_url}")
             try:
                 items = scan_course_tasks(
                     page,
@@ -405,6 +424,11 @@ class XiaoyaAdapter(PlaywrightPlatformAdapter):
                 debug.dump_page(page, "known-course-scan-error", course=course_name, course_id=course_id)
                 emit_progress(progress, f"{self.platform_name}：补扫 {course_name} 失败：{truncate(str(exc), 42)}")
                 continue
+            emit_progress(
+                progress,
+                f"{self.platform_name}：structure fallback returned count={len(items)} "
+                f"titles={assignment_log_summary(items)}",
+            )
             if items:
                 emit_progress(progress, f"{self.platform_name}：{course_name} 补扫识别 {len(items)} 条任务")
                 fallback_items.extend(items)
@@ -1023,6 +1047,21 @@ def has_real_course_assignments(assignments: list[PlatformAssignment], course_na
         and compact_text(item.title) != target
         for item in assignments
     )
+
+
+def assignment_log_summary(assignments: list[PlatformAssignment], *, limit: int = 12) -> str:
+    rows = [
+        {
+            "title": item.title,
+            "course": item.course,
+            "status": item.status,
+            "due_at": item.due_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for item in assignments[:limit]
+    ]
+    if len(assignments) > limit:
+        rows.append({"more": len(assignments) - limit})
+    return json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
 
 
 def find_course_id(text: str) -> str:

@@ -86,6 +86,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     debug_xiaoya_parser.add_argument("--json", action="store_true", help="输出 JSON")
     debug_xiaoya_parser.set_defaults(handler=cmd_debug_xiaoya_structure)
 
+    diagnose_web_parser = subparsers.add_parser(
+        "diagnose-web-xiaoya-structure",
+        help="按 Web 立即扫描路径诊断小雅结构化学写入结果",
+    )
+    diagnose_web_parser.add_argument("--user-id", type=int, default=1, help="Web 用户 ID，默认 1")
+    diagnose_web_parser.add_argument("--json", action="store_true", help="输出 JSON 诊断结果")
+    diagnose_web_parser.set_defaults(handler=cmd_diagnose_web_xiaoya_structure)
+
     check_parser = subparsers.add_parser("check", help="检查临近截止和逾期作业，并输出每日汇总")
     check_parser.add_argument("--scan", action="store_true", help="提醒前先用 Playwright 扫描平台作业")
     check_parser.add_argument("--headed-scan", action="store_true", help="扫描时显示浏览器窗口")
@@ -254,6 +262,137 @@ def cmd_debug_xiaoya_structure(args) -> int:
         if not items:
             print("未解析到结构化学任务。")
     return 0
+
+
+def cmd_diagnose_web_xiaoya_structure(args) -> int:
+    from .platforms.xiaoya import looks_like_course_summary_assignment, sanitize_url
+    from .web_app import (
+        APP_VERSION,
+        WebUser,
+        assignment_summary_for_log,
+        current_git_commit,
+        scan_user_homework,
+        user_browser_profile_root,
+        user_homework_db_path,
+    )
+
+    user = WebUser(
+        id=args.user_id,
+        email=f"diagnostic-user-{args.user_id}@local",
+        report_email="",
+        created_at="",
+    )
+    scan_id = f"diag-{int(time.time())}"
+    progress_events: list[dict] = []
+
+    def progress(message: str, percent: int | None = None) -> None:
+        progress_events.append({"message": message, "percent": percent})
+        if not args.json:
+            print(f"[diag:{scan_id}] progress percent={percent} {message}")
+
+    if not args.json:
+        print(f"version={APP_VERSION}")
+        print(f"commit={current_git_commit()}")
+        print(f"user_id={user.id}")
+        print(f"db={user_homework_db_path(user.id)}")
+        print(f"profile_root={user_browser_profile_root(user.id)}")
+
+    message = scan_user_homework(user, progress=progress, scan_request_id=scan_id)
+    db = HomeworkDB(user_homework_db_path(user.id))
+    try:
+        all_items = db.list_assignments(include_done=True)
+        todo_items = db.list_assignments(include_done=False)
+        xiaoya_items = [item for item in all_items if item.platform == "小雅"]
+        fake_items = [item for item in xiaoya_items if looks_like_course_summary_assignment(item)]
+        schema = query_assignment_schema(db)
+    finally:
+        db.close()
+
+    def item_to_dict(item):
+        return {
+            "id": item.id,
+            "platform": item.platform,
+            "course": item.course,
+            "title": item.title,
+            "status": item.status,
+            "due_at": human_datetime(item.due_at),
+            "url": sanitize_url(item.url),
+            "created_at": human_datetime(item.created_at) if item.created_at else "",
+            "updated_at": human_datetime(item.updated_at) if item.updated_at else "",
+        }
+
+    todo_has_zuoye_08 = any(item.platform == "小雅" and item.title == "作业-08" for item in todo_items)
+    todo_has_lattice = any(
+        item.platform == "小雅" and "实习2" in item.title and "点阵理论" in item.title
+        for item in todo_items
+    )
+    todo_has_completed_symmetry = any(
+        item.platform == "小雅" and "实习1" in item.title and "分子对称性" in item.title
+        for item in todo_items
+    )
+    ok = todo_has_zuoye_08 and todo_has_lattice and not todo_has_completed_symmetry and not fake_items
+    result = {
+        "ok": ok,
+        "version": APP_VERSION,
+        "commit": current_git_commit(),
+        "scan_request_id": scan_id,
+        "message": message,
+        "db": str(user_homework_db_path(user.id)),
+        "profile_root": str(user_browser_profile_root(user.id)),
+        "xiaoya_all": [item_to_dict(item) for item in xiaoya_items],
+        "todo": [item_to_dict(item) for item in todo_items],
+        "fake_items": [item_to_dict(item) for item in fake_items],
+        "checks": {
+            "todo_has_zuoye_08": todo_has_zuoye_08,
+            "todo_has_lattice": todo_has_lattice,
+            "todo_has_completed_symmetry": todo_has_completed_symmetry,
+            "fake_item_count": len(fake_items),
+        },
+        "schema": schema,
+        "progress_events": progress_events,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"scan_message={message}")
+        print(f"xiaoya_all={assignment_summary_for_log(xiaoya_items)}")
+        print(f"todo={assignment_summary_for_log(todo_items)}")
+        print(f"checks={json.dumps(result['checks'], ensure_ascii=False)}")
+        print("schema.assignments:")
+        for line in schema["table_sql"]:
+            print(line)
+        print("indexes:")
+        for index in schema["indexes"]:
+            print(json.dumps(index, ensure_ascii=False))
+        print(f"result={'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
+def query_assignment_schema(db: HomeworkDB) -> dict:
+    table_sql = [
+        row["sql"]
+        for row in db.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assignments'"
+        ).fetchall()
+        if row["sql"]
+    ]
+    indexes = []
+    for row in db.conn.execute("PRAGMA index_list(assignments)").fetchall():
+        index_name = row["name"]
+        escaped_index_name = str(index_name).replace('"', '""')
+        columns = [
+            info["name"]
+            for info in db.conn.execute(f'PRAGMA index_info("{escaped_index_name}")').fetchall()
+        ]
+        indexes.append(
+            {
+                "name": index_name,
+                "unique": bool(row["unique"]),
+                "origin": row["origin"],
+                "columns": columns,
+            }
+        )
+    return {"table_sql": table_sql, "indexes": indexes}
 
 
 def cmd_check(args) -> int:
