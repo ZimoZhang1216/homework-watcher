@@ -30,6 +30,7 @@ NOISE_LINES = {
     "截止时间",
     "操作",
     "进入任务",
+    "作业任务",
     "全部任务",
     "自主观看",
     "课堂练习",
@@ -49,36 +50,62 @@ def parse_xiaoya_task_text(
     seen: set[tuple[str, datetime]] = set()
 
     for index, line in enumerate(lines):
-        title = extract_title_from_line(line)
-        if not title:
+        if normalize_title(line) == normalize_title(course):
             continue
-        window = " ".join(lines[index : index + 10])
-        status_match = STATUS_RE.search(window)
-        dates = DATE_RE.findall(window)
-        if not status_match or not dates:
+        if not possible_task_start_line(line):
             continue
-        due_at = parse_xiaoya_due_at(dates[-1])
-        status_raw = status_match.group(0)
-        if is_course_summary(title=title, course=course, status_raw=status_raw, due_at=due_at):
+        block = collect_task_text_block(lines, index)
+        candidate = parse_xiaoya_task_row(
+            split_task_text_block(block),
+            course=course,
+            task_url=task_url,
+            course_id=course_id,
+        )
+        if candidate is None:
             continue
-        key = (title, due_at)
+        key = (candidate.title, candidate.due_at)
         if key in seen:
             continue
         seen.add(key)
-        candidates.append(
-            AssignmentCandidate(
-                platform=XIAOYA_PLATFORM_LABEL,
-                course=course,
-                title=title,
-                status_raw=status_raw,
-                due_at=due_at,
-                url=task_url,
-                source_key=f"xiaoya:{course_id or course}:{title}:{due_at.isoformat(timespec='seconds')}",
-                raw_snapshot=sanitize_snapshot(window[:500]),
-            )
-        )
+        candidates.append(candidate)
 
     return candidates
+
+
+def parse_xiaoya_task_row(
+    cells: list[str], *, course: str, task_url: str, course_id: str = ""
+) -> AssignmentCandidate | None:
+    cleaned = [normalize_cell(cell) for cell in cells if normalize_cell(cell)]
+    if not cleaned:
+        return None
+    joined = "\n".join(cleaned)
+    dates = DATE_RE.findall(joined)
+    status_match = STATUS_RE.search(joined)
+    if not dates or not status_match:
+        return None
+    due_at = parse_xiaoya_due_at(dates[-1])
+    status_raw = status_match.group(0)
+    title = extract_title_from_cells(cleaned)
+    if not title or is_course_summary(title=title, course=course, status_raw=status_raw, due_at=due_at):
+        return None
+    return AssignmentCandidate(
+        platform=XIAOYA_PLATFORM_LABEL,
+        course=course,
+        title=title,
+        status_raw=status_raw,
+        due_at=due_at,
+        url=task_url,
+        source_key=f"xiaoya:{course_id or course}:{title}:{due_at.isoformat(timespec='seconds')}",
+        raw_snapshot=sanitize_snapshot(joined[:500]),
+    )
+
+
+def extract_title_from_cells(cells: list[str]) -> str:
+    for cell in cells:
+        title = extract_title_from_line(cell)
+        if title:
+            return title
+    return ""
 
 
 def extract_title_from_line(line: str) -> str:
@@ -91,13 +118,20 @@ def extract_title_from_line(line: str) -> str:
         return ""
     if STATUS_RE.fullmatch(text):
         return ""
-    if "作业" in text:
+    if looks_like_metadata(text):
+        return ""
+    has_row_context = "\\" in text or bool(STATUS_RE.search(text)) or bool(DATE_RE.search(text))
+    if "作业" in text and has_row_context:
         match = re.match(r"(?P<title>.+?)\s*\\?\s*作业(?:\s|$)", text)
+        if match:
+            return normalize_title(match.group("title"))
+    if "测验" in text and has_row_context:
+        match = re.match(r"(?P<title>.+?)\s*\\?\s*测验(?:\s|$)", text)
         if match:
             return normalize_title(match.group("title"))
     if STATUS_RE.search(text):
         before_status = STATUS_RE.split(text, maxsplit=1)[0]
-        return normalize_title(before_status.replace("\\", " ").replace("作业", " "))
+        return normalize_title(before_status.replace("\\", " ").replace("作业", " ").replace("测验", " "))
     if len(text) > 80:
         return ""
     return normalize_title(text)
@@ -105,6 +139,47 @@ def extract_title_from_line(line: str) -> str:
 
 def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", title).strip(" /\\|")
+
+
+def normalize_cell(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def possible_task_start_line(line: str) -> bool:
+    title = extract_title_from_line(line)
+    if not title:
+        return False
+    return not DATE_RE.search(title)
+
+
+def collect_task_text_block(lines: list[str], start_index: int) -> str:
+    block = [lines[start_index]]
+    for line in lines[start_index + 1 : start_index + 20]:
+        current = "\n".join(block)
+        if possible_task_start_line(line) and DATE_RE.search(current) and STATUS_RE.search(current):
+            break
+        block.append(line)
+        if line == "进入任务" and DATE_RE.search(current):
+            break
+    return "\n".join(block)
+
+
+def split_task_text_block(block: str) -> list[str]:
+    cells: list[str] = []
+    for line in block.splitlines():
+        pieces = re.split(r"\t+|\s{2,}", line.strip())
+        if len(pieces) == 1:
+            pieces = [line]
+        cells.extend(piece.strip() for piece in pieces if piece.strip())
+    return cells
+
+
+def looks_like_metadata(text: str) -> bool:
+    if text in {"全体", "个人", "小组", "公开", "私有"}:
+        return True
+    if text.startswith(("共", "第")) and ("页" in text or "条" in text):
+        return True
+    return False
 
 
 def parse_xiaoya_due_at(value: str) -> datetime:
@@ -224,7 +299,7 @@ class XiaoyaScanner:
                 break
             seen_pages.add(page_key)
 
-            page_candidates = self.scan_known_course_text(course, text)
+            page_candidates = self.scan_known_course_page_content(page, course, text)
             if page_no == 1 and not page_candidates:
                 dump_debug_page(
                     page,
@@ -272,6 +347,125 @@ class XiaoyaScanner:
             task_url=course.task_url,
             course_id=course.course_id,
         )
+
+    def scan_known_course_page_content(
+        self, page: Page, course: KnownCourseConfig, text: str
+    ) -> list[AssignmentCandidate]:
+        dom_candidates = parse_xiaoya_task_rows(
+            evaluate_task_rows(page),
+            course=course.course,
+            task_url=course.task_url,
+            course_id=course.course_id,
+        )
+        if dom_candidates:
+            return dom_candidates
+        return self.scan_known_course_text(course, text)
+
+
+def parse_xiaoya_task_rows(
+    rows: list[list[str]], *, course: str, task_url: str, course_id: str = ""
+) -> list[AssignmentCandidate]:
+    candidates: list[AssignmentCandidate] = []
+    seen: set[tuple[str, datetime]] = set()
+    for row in rows:
+        candidate = parse_xiaoya_task_row(
+            row,
+            course=course,
+            task_url=task_url,
+            course_id=course_id,
+        )
+        if candidate is None:
+            continue
+        key = (candidate.title, candidate.due_at)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def evaluate_task_rows(page: Page) -> list[list[str]]:
+    rows: list[list[str]] = []
+    rows.extend(evaluate_dom_task_rows(page))
+    rows.extend(evaluate_visual_task_rows(page))
+    seen: set[str] = set()
+    unique: list[list[str]] = []
+    for row in rows:
+        cleaned = collapse_duplicate_cells([normalize_cell(str(cell)) for cell in row if normalize_cell(str(cell))])
+        key = "\n".join(cleaned)
+        if len(cleaned) < 3 or key in seen:
+            continue
+        seen.add(key)
+        unique.append(cleaned)
+    return unique
+
+
+def evaluate_dom_task_rows(page: Page) -> list[list[str]]:
+    try:
+        raw_rows = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('tbody tr, .ant-list-item, [role="row"]'))
+              .slice(0, 240)
+              .map(row => {
+                const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const cells = Array.from(row.querySelectorAll('td, [role="cell"], .ant-list-item-meta-title, .ant-list-item-meta-description, [class*="cell"]'))
+                  .map(cell => compact(cell.innerText || cell.textContent))
+                  .filter(Boolean);
+                const text = compact(row.innerText || row.textContent);
+                return cells.length ? cells : (text ? [text] : []);
+              })
+              .filter(row => row.length);
+            """
+        )
+    except Exception:
+        return []
+    return raw_rows if isinstance(raw_rows, list) else []
+
+
+def evaluate_visual_task_rows(page: Page) -> list[list[str]]:
+    try:
+        raw_rows = page.evaluate(
+            """
+            () => {
+              const compact = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const cells = Array.from(document.querySelectorAll('.ant-table tbody tr:not(.ant-table-measure-row) td, table tbody tr td, [role="row"] [role="cell"]'))
+                .map(cell => {
+                  const rect = cell.getBoundingClientRect();
+                  return {
+                    text: compact(cell.innerText || cell.textContent),
+                    top: Math.round((rect.top + rect.height / 2) / 4) * 4,
+                    left: Math.round(rect.left),
+                    width: rect.width,
+                    height: rect.height,
+                  };
+                })
+                .filter(cell => cell.text && cell.width > 0 && cell.height > 0);
+              const groups = new Map();
+              for (const cell of cells) {
+                if (!groups.has(cell.top)) groups.set(cell.top, []);
+                groups.get(cell.top).push(cell);
+              }
+              return Array.from(groups.values())
+                .map(row => row.sort((a, b) => a.left - b.left).map(cell => cell.text))
+                .filter(row => row.length >= 3);
+            }
+            """
+        )
+    except Exception:
+        return []
+    return raw_rows if isinstance(raw_rows, list) else []
+
+
+def collapse_duplicate_cells(cells: list[str]) -> list[str]:
+    collapsed: list[str] = []
+    for cell in cells:
+        if collapsed and collapsed[-1] == cell:
+            continue
+        collapsed.append(cell)
+    half = len(collapsed) // 2
+    if half and collapsed[:half] == collapsed[half:]:
+        return collapsed[:half]
+    return collapsed
 
 
 def read_visible_text(page: Page) -> str:

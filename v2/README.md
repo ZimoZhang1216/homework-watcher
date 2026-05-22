@@ -7,7 +7,7 @@
 - FastAPI 网页：`GET /`
 - SQLite assignments 表
 - 统一 `ScanService`：Web 按钮和 CLI 共用同一套扫描链路
-- 小雅 `known_courses.task_url` 扫描
+- 小雅 `known_courses.task_url` 通用扫描
 - Playwright 持久化登录态
 - CLI 诊断命令
 - scan 日志和脱敏 debug dump
@@ -40,7 +40,7 @@ v2/
   pyproject.toml
 ```
 
-## 配置结构化学任务页
+## 配置小雅任务页
 
 编辑 `config/platforms.yaml`：
 
@@ -49,9 +49,9 @@ xiaoya:
   enabled: true
   base_url: "https://nankai.ai-augmented.com"
   known_courses:
-    - course: "结构化学"
-      course_id: "6902426124991620398"
-      task_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task"
+    - course: "课程名"
+      course_id: "课程 ID"
+      task_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse/课程 ID/task"
 ```
 
 v2 优先扫描 `known_courses`，不依赖从课程总页猜任务入口。
@@ -170,12 +170,11 @@ python -m homework_watcher.cli db-list
 python -m homework_watcher.app
 ```
 
-结构化学预期：
+小雅验收重点：
 
-- 当前待办显示：`作业-08`
-- 当前待办显示：`实习2 点阵理论`
-- 当前待办不显示：`实习1 分子对称性`
-- 当前待办不显示：`结构化学 / 结构化学 / 2026-07-31`
+- `scan-known-xiaoya` 输出 `xiaoya_assignment_count` 和 `xiaoya_todo_count`。
+- 当前任务状态如 `进行中`、`未提交`、`待完成`、`未完成` 会进入待办。
+- 已完成或已截止任务会保留在所有记录里，但不进入当前待办。
 
 ## 安全边界
 
