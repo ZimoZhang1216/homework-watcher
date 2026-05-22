@@ -18,6 +18,22 @@ XIAOYA_PLATFORM_LABEL = "小雅"
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?")
 STATUS_RE = re.compile(r"进行中|未开始|已完成|已截止|未提交|待完成|未完成|已提交|已批阅")
 MAX_XIAOYA_PAGES = 20
+XIAOYA_BOOTSTRAP_LOADING_MARKERS = (
+    "正在加载应用",
+    "正在加载环境配置",
+)
+XIAOYA_TASK_READY_MARKERS = (
+    "作业任务",
+    "全部任务",
+    "任务类型",
+    "截止时间",
+    "进入任务",
+    "暂无数据",
+    "暂无任务",
+    "暂无作业",
+    "没有数据",
+    "无数据",
+)
 NOISE_LINES = {
     "标题",
     "位置",
@@ -268,11 +284,19 @@ class XiaoyaScanner:
         deadline = monotonic_time.monotonic() + course_timeout_seconds
         page.goto(course.task_url, wait_until="domcontentloaded", timeout=min(10000, course_timeout_seconds * 1000))
         remaining_ms = max(1000, int((deadline - monotonic_time.monotonic()) * 1000))
-        page.wait_for_function(
-            "() => document.body && document.body.innerText && document.body.innerText.length > 20",
-            timeout=min(10000, remaining_ms),
-        )
-        text = read_visible_text(page)
+        if emit:
+            emit(f"小雅：等待课程 {course.course} 任务页加载完成")
+        text = wait_for_xiaoya_task_page_ready(page, timeout_ms=remaining_ms)
+        if not text.strip() or looks_like_xiaoya_bootstrap_loading(text):
+            dump_debug_page(
+                page,
+                self.settings,
+                scan_id=scan_id,
+                stage="not-ready",
+                course=course.course,
+                page_no=1,
+            )
+            raise RuntimeError("小雅任务页加载超时，仍停在应用启动页")
         if looks_like_login_page(text):
             dump_debug_page(
                 page,
@@ -332,11 +356,12 @@ class XiaoyaScanner:
                     arg=previous_text,
                     timeout=10000,
                 )
+                remaining_ms = max(1000, int((deadline - monotonic_time.monotonic()) * 1000))
+                text = wait_for_xiaoya_task_page_ready(page, timeout_ms=remaining_ms)
             except PlaywrightTimeoutError:
                 if emit:
                     emit(f"小雅：课程 {course.course} 翻页后内容未变化，停止分页")
                 break
-            text = read_visible_text(page)
 
         return all_candidates
 
@@ -473,6 +498,46 @@ def read_visible_text(page: Page) -> str:
         return str(page.locator("body").inner_text(timeout=5000))
     except PlaywrightTimeoutError:
         return str(page.evaluate("() => document.body ? document.body.innerText : ''"))
+
+
+def wait_for_xiaoya_task_page_ready(page: Page, *, timeout_ms: int) -> str:
+    deadline = monotonic_time.monotonic() + max(timeout_ms, 1000) / 1000
+    last_text = ""
+    while monotonic_time.monotonic() < deadline:
+        last_text = read_body_inner_text(page)
+        if looks_like_xiaoya_task_page_ready(last_text):
+            return last_text
+        page.wait_for_timeout(500)
+    return last_text or read_visible_text(page)
+
+
+def read_body_inner_text(page: Page) -> str:
+    try:
+        return str(page.evaluate("() => document.body ? document.body.innerText : ''"))
+    except Exception:  # noqa: BLE001 - polling should keep waiting through transient page states.
+        return ""
+
+
+def looks_like_xiaoya_task_page_ready(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return False
+    if looks_like_login_page(text):
+        return True
+    if looks_like_xiaoya_bootstrap_loading(text):
+        return False
+    if any(marker in compact for marker in XIAOYA_TASK_READY_MARKERS):
+        return True
+    return bool(DATE_RE.search(text) and STATUS_RE.search(text))
+
+
+def looks_like_xiaoya_bootstrap_loading(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return False
+    return any(marker in compact for marker in XIAOYA_BOOTSTRAP_LOADING_MARKERS) and not any(
+        marker in compact for marker in XIAOYA_TASK_READY_MARKERS
+    )
 
 
 def looks_like_login_page(text: str) -> bool:

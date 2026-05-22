@@ -4,6 +4,8 @@ import unittest
 
 from homework_watcher.scanners.xiaoya import (
     MAX_XIAOYA_PAGES,
+    looks_like_xiaoya_bootstrap_loading,
+    looks_like_xiaoya_task_page_ready,
     parse_xiaoya_due_at,
     parse_xiaoya_task_rows,
     parse_xiaoya_task_text,
@@ -123,6 +125,19 @@ class Phase4XiaoyaParserTests(unittest.TestCase):
             course_id="physics",
         )
         self.assertEqual([(item.title, item.status_raw) for item in assignments], [("光学实验报告", "进行中")])
+
+    def test_xiaoya_bootstrap_loading_is_not_ready(self) -> None:
+        text = """
+        100%
+        正在加载应用，请稍候。
+        正在加载环境配置，请稍候。。。
+        """
+        self.assertTrue(looks_like_xiaoya_bootstrap_loading(text))
+        self.assertFalse(looks_like_xiaoya_task_page_ready(text))
+
+    def test_xiaoya_task_page_ready_markers(self) -> None:
+        self.assertTrue(looks_like_xiaoya_task_page_ready("作业任务\n全部任务\n标题\n截止时间"))
+        self.assertTrue(looks_like_xiaoya_task_page_ready("暂无数据"))
 
     def test_date_only_defaults_to_end_of_day(self) -> None:
         self.assertEqual(parse_xiaoya_due_at("2026-05-22").isoformat(sep=" "), "2026-05-22 23:59:59")
