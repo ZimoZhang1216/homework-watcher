@@ -7,6 +7,7 @@
 - FastAPI 网页：`GET /`
 - SQLite assignments 表
 - 统一 `ScanService`：Web 按钮和 CLI 共用同一套扫描链路
+- 长江雨课堂课程作业扫描
 - 小雅 `known_courses.task_url` 通用扫描
 - Playwright 持久化登录态
 - CLI 诊断命令
@@ -30,6 +31,7 @@ v2/
     scan_service.py
     scanners/
       base.py
+      changjiang_yuketang.py
       fake.py
       xiaoya.py
     settings.py
@@ -40,11 +42,15 @@ v2/
   pyproject.toml
 ```
 
-## 配置小雅任务页
+## 配置平台扫描
 
 编辑 `config/platforms.yaml`：
 
 ```yaml
+changjiang-yuketang:
+  enabled: true
+  base_url: "https://changjiang.yuketang.cn/v2/web/index"
+
 xiaoya:
   enabled: true
   base_url: "https://nankai.ai-augmented.com"
@@ -54,7 +60,7 @@ xiaoya:
       task_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse/课程 ID/task"
 ```
 
-v2 优先扫描 `known_courses`，不依赖从课程总页猜任务入口。
+长江雨课堂会从课程列表进入每门课解析作业。小雅优先扫描 `known_courses`，不依赖从课程总页猜任务入口。
 
 ## 本地运行
 
@@ -157,7 +163,7 @@ data/playwright-user-data/users/default/xiaoya
 
 后续引入多用户账号时，把 `default` 替换为登录用户 ID 即可隔离各用户的浏览器登录态。
 
-小雅扫描使用 `config/platforms.yaml` 中的 `known_courses`，点击首页“立即扫描”会读取默认账号的小雅登录态，解析作业并写入 `assignments` 表；`进行中`、`未完成` 等当前任务会进入待办。
+点击首页“立即扫描”会读取默认账号的长江雨课堂和小雅登录态，解析作业并写入 `assignments` 表；`进行中`、`未完成`、`未提交` 等当前任务会进入待办。长江雨课堂中 `未开始/未开放` 会标记为不可完成，不进入当前待办。
 
 ## 验收命令
 
@@ -165,6 +171,7 @@ data/playwright-user-data/users/default/xiaoya
 cd v2
 source .venv/bin/activate
 python -m homework_watcher.cli health
+python -m homework_watcher.cli scan --platform changjiang-yuketang
 python -m homework_watcher.cli scan-known-xiaoya
 python -m homework_watcher.cli db-list
 python -m homework_watcher.app
@@ -175,6 +182,12 @@ python -m homework_watcher.app
 - `scan-known-xiaoya` 输出 `xiaoya_assignment_count` 和 `xiaoya_todo_count`。
 - 当前任务状态如 `进行中`、`未提交`、`待完成`、`未完成` 会进入待办。
 - 已完成或已截止任务会保留在所有记录里，但不进入当前待办。
+
+长江雨课堂验收重点：
+
+- `scan --platform changjiang-yuketang` 输出 `candidates_count`。
+- `未作答/未提交` 会进入待办。
+- `得分/已提交/已完成` 与 `未开始/未开放` 不进入当前待办。
 
 ## 安全边界
 

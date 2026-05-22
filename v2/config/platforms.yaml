@@ -1,3 +1,7 @@
+changjiang-yuketang:
+  enabled: true
+  base_url: "https://changjiang.yuketang.cn/v2/web/index"
+
 xiaoya:
   enabled: true
   base_url: "https://nankai.ai-augmented.com"
