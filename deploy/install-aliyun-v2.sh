@@ -10,7 +10,8 @@ APP_DIR="${APP_DIR:-/opt/homework-watcher-v2}"
 ENV_FILE="${ENV_FILE:-/etc/homework-watcher-v2.env}"
 PUBLIC_IP="${PUBLIC_IP:-8.141.109.80}"
 REPO_URL="${REPO_URL:-https://github.com/ZimoZhang1216/homework-watcher.git}"
-OLD_PROFILE_DIR="${OLD_PROFILE_DIR:-/var/lib/homework-watcher/web/users/1/browser-profiles/xiaoya}"
+OLD_PROFILE_ROOT="${OLD_PROFILE_ROOT:-/var/lib/homework-watcher/web/users/1/browser-profiles}"
+OLD_PROFILE_DIR="${OLD_PROFILE_DIR:-$OLD_PROFILE_ROOT/xiaoya}"
 MIGRATE_OLD_PROFILE="${MIGRATE_OLD_PROFILE:-1}"
 REQUESTED_NOVNC_PASSWORD="${NOVNC_PASSWORD:-}"
 
@@ -125,6 +126,14 @@ if [ "$MIGRATE_OLD_PROFILE" = "1" ] \
   log "copying existing Xiaoya browser profile from old deployment"
   mkdir -p "$PLAYWRIGHT_USER_DATA_DIR"
   cp -a "$OLD_PROFILE_DIR" "$PLAYWRIGHT_USER_DATA_DIR/xiaoya"
+fi
+
+if [ "$MIGRATE_OLD_PROFILE" = "1" ] \
+  && [ -d "$OLD_PROFILE_ROOT/changjiang-yuketang" ] \
+  && [ ! -d "$PLAYWRIGHT_USER_DATA_DIR/users/default/changjiang-yuketang/Default" ]; then
+  log "copying existing Changjiang Yuketang browser profile from old deployment"
+  mkdir -p "$PLAYWRIGHT_USER_DATA_DIR/users/default"
+  cp -a "$OLD_PROFILE_ROOT/changjiang-yuketang" "$PLAYWRIGHT_USER_DATA_DIR/users/default/changjiang-yuketang"
 fi
 
 log "creating venv with $python_bin"

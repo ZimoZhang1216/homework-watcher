@@ -144,6 +144,18 @@ homework-watcher-v2-login-xiaoya
 
 `homework-watcher-v2-login-xiaoya` 会在服务器的 noVNC 桌面中打开小雅登录浏览器；noVNC 地址会写入 `/root/homework-watcher-v2-deployment.txt`。
 
+## 平台登录
+
+v2 首页提供“长江雨课堂登录”按钮。点击后服务会在服务器上的有界面 Chromium 中打开长江雨课堂，并跳转到 noVNC 远程浏览器页面。手动登录完成后点击“我已完成登录”，服务会关闭浏览器并保留登录态。
+
+当前未接入账号体系，长江雨课堂 profile 使用默认账号路径：
+
+```text
+data/playwright-user-data/users/default/changjiang-yuketang
+```
+
+后续引入多用户账号时，把 `default` 替换为登录用户 ID 即可隔离各用户的浏览器登录态。
+
 ## 验收命令
 
 ```bash

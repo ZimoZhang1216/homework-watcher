@@ -4,20 +4,26 @@ from datetime import datetime
 from html import escape
 
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
+from .remote_login import RemoteLoginManager, build_novnc_url
 from .scan_service import ScanService, latest_scan_result
 from .settings import load_settings
+
+
+DEFAULT_USER_KEY = "default"
+DEFAULT_USER_LABEL = "默认账号"
 
 
 def create_app() -> FastAPI:
     settings = load_settings()
     init_db(settings)
     session_factory = create_session_factory(settings)
+    login_manager = RemoteLoginManager()
     app = FastAPI(title="homework-watcher-v2")
 
     @app.get("/health")
@@ -34,6 +40,7 @@ def create_app() -> FastAPI:
     def index():
         with session_factory() as session:
             todos = [assignment_to_dict(item) for item in list_todos(session)]
+        login_status = login_manager.status()
         return HTMLResponse(
             render_page(
                 "当前待办",
@@ -52,6 +59,7 @@ def create_app() -> FastAPI:
                     <a class="button-link" href="/assignments">查看所有记录</a>
                   </div>
                 </section>
+                {render_yuketang_login_panel(login_status)}
                 """,
                 settings=settings,
             )
@@ -133,7 +141,122 @@ def create_app() -> FastAPI:
             )
         )
 
+    @app.post("/login/changjiang-yuketang")
+    async def start_yuketang_login():
+        try:
+            await login_manager.start_yuketang(
+                settings,
+                user_key=DEFAULT_USER_KEY,
+                user_label=DEFAULT_USER_LABEL,
+            )
+        except Exception as exc:  # noqa: BLE001 - return the operator-facing failure.
+            return HTMLResponse(
+                render_page(
+                    "长江雨课堂登录启动失败",
+                    render_message_panel(
+                        "长江雨课堂登录启动失败",
+                        f"{type(exc).__name__}: {exc}",
+                        back_href="/",
+                    ),
+                    settings=settings,
+                ),
+                status_code=500,
+            )
+        return RedirectResponse("/remote-login", status_code=303)
+
+    @app.get("/remote-login", response_class=HTMLResponse)
+    async def remote_login(request: Request):
+        await login_manager.close_expired()
+        status = login_manager.status()
+        if status is None:
+            return HTMLResponse(
+                render_page(
+                    "远程登录",
+                    render_message_panel("没有远程登录会话", "请从首页打开长江雨课堂登录。", back_href="/"),
+                    settings=settings,
+                )
+            )
+        return HTMLResponse(
+            render_page(
+                "远程登录",
+                render_remote_login_panel(status, build_novnc_url(str(request.base_url))),
+                settings=settings,
+            )
+        )
+
+    @app.post("/remote-login/finish")
+    async def finish_remote_login():
+        await login_manager.finish()
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/remote-login/cancel")
+    async def cancel_remote_login():
+        await login_manager.finish()
+        return RedirectResponse("/", status_code=303)
+
     return app
+
+
+def render_yuketang_login_panel(status) -> str:
+    if status is not None:
+        return f"""
+        <section class="panel login-panel">
+          <div class="panel-title">
+            <h2>平台登录</h2>
+            <span class="count">开</span>
+          </div>
+          <p class="muted">长江雨课堂远程登录窗口已打开，剩余 {escape(str(status.expires_in_seconds // 60))} 分钟。</p>
+          <div class="actions">
+            <a class="button-link" href="/remote-login">继续登录</a>
+          </div>
+        </section>
+        """
+    return """
+    <section class="panel login-panel">
+      <div class="panel-title">
+        <h2>平台登录</h2>
+        <span class="count">1</span>
+      </div>
+      <p class="muted">打开服务器上的长江雨课堂浏览器窗口，通过 noVNC 手动登录并保存浏览器登录态。</p>
+      <div class="actions">
+        <form method="post" action="/login/changjiang-yuketang">
+          <button type="submit">长江雨课堂登录</button>
+        </form>
+      </div>
+    </section>
+    """
+
+
+def render_remote_login_panel(status, novnc_url: str) -> str:
+    remaining_minutes = max(1, (status.expires_in_seconds + 59) // 60)
+    return f"""
+    <section class="panel remote-panel">
+      <div>
+        <h2>正在登录：{escape(status.platform)}</h2>
+        <p class="muted">在远程浏览器中完成登录。程序只保存浏览器登录态，不读取平台密码。</p>
+      </div>
+      <div class="remote-actions">
+        <p><span class="label">开始时间</span>{escape(status.started_at)}</p>
+        <p><span class="label">账号</span>{escape(status.user_label)}</p>
+        <p><span class="label">自动释放</span>{escape(str(remaining_minutes))} 分钟</p>
+        <div class="actions">
+          <a class="button-link primary-link" target="_blank" rel="noreferrer" href="{escape(novnc_url)}">打开远程浏览器</a>
+          <form method="post" action="/remote-login/finish"><button type="submit">我已完成登录</button></form>
+          <form method="post" action="/remote-login/cancel"><button type="submit" class="secondary">放弃本次登录</button></form>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def render_message_panel(title: str, message: str, *, back_href: str) -> str:
+    return f"""
+    <section class="panel">
+      <h2>{escape(title)}</h2>
+      <p class="muted">{escape(message)}</p>
+      <div class="actions"><a class="button-link" href="{escape(back_href)}">返回</a></div>
+    </section>
+    """
 
 
 def render_assignment_table(assignments: list[dict[str, object]]) -> str:
@@ -186,10 +309,17 @@ def render_page(title: str, body: str, *, settings) -> str:
     th {{ color: #66736d; font-size: 14px; }}
     a {{ color: #145f45; }}
     button, .button-link {{ display: inline-flex; align-items: center; min-height: 42px; border: 1px solid #1f6b4b; background: #1f6b4b; color: #fff; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }}
+    button.secondary {{ background: #fff; color: #1f6b4b; }}
     .button-link {{ background: #fff; color: #1f6b4b; }}
+    .primary-link {{ background: #1f6b4b; color: #fff; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
+    .login-panel {{ margin-top: 18px; }}
+    .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
+    .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
+    .label {{ display: inline-block; min-width: 72px; color: #66736d; font-weight: 700; }}
     pre {{ white-space: pre-wrap; word-break: break-word; background: #f2f4ef; border-radius: 6px; padding: 16px; max-height: 560px; overflow: auto; }}
     footer {{ margin-top: 32px; color: #66736d; font-size: 14px; }}
+    @media (max-width: 720px) {{ .remote-panel {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
