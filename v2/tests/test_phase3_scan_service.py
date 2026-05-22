@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
+from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.database import create_session_factory, init_db, list_todos
 from homework_watcher.scan_service import ScanService
+from homework_watcher.scanners.base import ScannerContext
 from homework_watcher.scanners.fake import FakeScanner
 from homework_watcher.settings import Settings
 
@@ -45,6 +48,45 @@ class Phase3ScanServiceTests(unittest.TestCase):
             self.assertIn("scan started", log_text)
             self.assertIn("platform start fake", log_text)
             self.assertIn("final todo count=1", log_text)
+
+    def test_xiaoya_scan_writes_current_assignments_to_todos(self) -> None:
+        class StubXiaoyaScanner:
+            platform_key = "xiaoya"
+
+            def scan(self, context: ScannerContext) -> list[AssignmentCandidate]:
+                context.emit(50, "小雅：测试扫描")
+                return [
+                    AssignmentCandidate(
+                        platform="小雅",
+                        course="结构化学",
+                        title="作业-08",
+                        status_raw="进行中",
+                        due_at=datetime(2026, 5, 22, 23, 59, 59),
+                        url="https://nankai.ai-augmented.com/app/jx-web/mycourse/1/task",
+                        source_key="xiaoya:structure:homework-08",
+                    ),
+                    AssignmentCandidate(
+                        platform="小雅",
+                        course="结构化学",
+                        title="实习1 分子对称性",
+                        status_raw="已完成",
+                        due_at=datetime(2026, 5, 21, 23, 59, 59),
+                        url="https://nankai.ai-augmented.com/app/jx-web/mycourse/1/task",
+                        source_key="xiaoya:structure:symmetry",
+                    ),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = service_settings(tmpdir)
+            result = ScanService(settings, scanners=[StubXiaoyaScanner()]).run_scan(platforms=["xiaoya"])
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.candidates_count, 2)
+            self.assertEqual(result.upsert_stats.inserted, 2)
+            self.assertEqual(
+                [(item["platform"], item["course"], item["title"]) for item in result.todos],
+                [("小雅", "结构化学", "作业-08")],
+            )
 
 
 if __name__ == "__main__":

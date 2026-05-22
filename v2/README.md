@@ -146,15 +146,18 @@ homework-watcher-v2-login-xiaoya
 
 ## 平台登录
 
-v2 首页提供“长江雨课堂登录”按钮。点击后服务会在服务器上的有界面 Chromium 中打开长江雨课堂，并跳转到 noVNC 远程浏览器页面。手动登录完成后点击“我已完成登录”，服务会关闭浏览器并保留登录态。
+v2 首页提供“长江雨课堂登录”和“小雅登录”按钮。点击后服务会在服务器上的有界面 Chromium 中打开对应平台，并跳转到 noVNC 远程浏览器页面。手动登录完成后点击“我已完成登录”，服务会关闭浏览器并保留登录态。
 
-当前未接入账号体系，长江雨课堂 profile 使用默认账号路径：
+当前未接入账号体系，平台 profile 使用默认账号路径：
 
 ```text
 data/playwright-user-data/users/default/changjiang-yuketang
+data/playwright-user-data/users/default/xiaoya
 ```
 
 后续引入多用户账号时，把 `default` 替换为登录用户 ID 即可隔离各用户的浏览器登录态。
+
+小雅扫描使用 `config/platforms.yaml` 中的 `known_courses`，点击首页“立即扫描”会读取默认账号的小雅登录态，解析作业并写入 `assignments` 表；`进行中`、`未完成` 等当前任务会进入待办。
 
 ## 验收命令
 

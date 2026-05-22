@@ -17,6 +17,10 @@ YUKETANG_URL = os.environ.get(
     "HW_CHANGJIANG_YUKETANG_URL",
     "https://changjiang.yuketang.cn/v2/web/index",
 )
+XIAOYA_URL = os.environ.get(
+    "HW_XIAOYA_URL",
+    "https://nankai.ai-augmented.com/app/jx-web/mycourse",
+)
 
 
 @dataclass(frozen=True)
@@ -40,11 +44,50 @@ class RemoteLoginManager:
         user_key: str = "default",
         user_label: str = "默认账号",
     ) -> LoginStatus:
+        return await self.start_platform(
+            settings,
+            platform="长江雨课堂",
+            slug="changjiang-yuketang",
+            url=YUKETANG_URL,
+            user_key=user_key,
+            user_label=user_label,
+            prepare_context=prefer_student_entry,
+            prepare_page=ensure_student_tab,
+        )
+
+    async def start_xiaoya(
+        self,
+        settings: Settings,
+        *,
+        user_key: str = "default",
+        user_label: str = "默认账号",
+    ) -> LoginStatus:
+        return await self.start_platform(
+            settings,
+            platform="小雅",
+            slug="xiaoya",
+            url=XIAOYA_URL,
+            user_key=user_key,
+            user_label=user_label,
+        )
+
+    async def start_platform(
+        self,
+        settings: Settings,
+        *,
+        platform: str,
+        slug: str,
+        url: str,
+        user_key: str,
+        user_label: str,
+        prepare_context=None,
+        prepare_page=None,
+    ) -> LoginStatus:
         await self.close_expired()
         if self.active is not None:
             return self.status()  # type: ignore[return-value]
 
-        profile_dir = profile_dir_for_user_platform(settings, user_key, "changjiang-yuketang")
+        profile_dir = profile_dir_for_user_platform(settings, user_key, slug)
         profile_dir.mkdir(parents=True, exist_ok=True)
         remove_chromium_profile_locks(profile_dir)
 
@@ -58,10 +101,12 @@ class RemoteLoginManager:
                 viewport={"width": 1440, "height": 1000},
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
-            await prefer_student_entry(context)
+            if prepare_context is not None:
+                await prepare_context(context)
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(YUKETANG_URL, wait_until="domcontentloaded", timeout=20_000)
-            await ensure_student_tab(page)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            if prepare_page is not None:
+                await prepare_page(page)
         except Exception:
             if context is not None:
                 await context.close()
@@ -69,8 +114,8 @@ class RemoteLoginManager:
             raise
 
         self.active = {
-            "platform": "长江雨课堂",
-            "slug": "changjiang-yuketang",
+            "platform": platform,
+            "slug": slug,
             "user_key": user_key,
             "user_label": user_label,
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),

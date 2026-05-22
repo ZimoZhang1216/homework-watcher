@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from homework_watcher.remote_login import normalize_novnc_url, profile_dir_for_user_platform
+from homework_watcher.scanners.xiaoya import XiaoyaScanner
 from homework_watcher.settings import Settings
 
 
@@ -40,6 +41,14 @@ class Phase5RemoteLoginTests(unittest.TestCase):
             self.assertEqual(
                 path,
                 Path(tmpdir) / "profiles" / "users" / "user-7" / "changjiang-yuketang",
+            )
+
+    def test_xiaoya_scanner_uses_default_user_scoped_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = test_settings(tmpdir)
+            self.assertEqual(
+                XiaoyaScanner(settings).profile_dir,
+                Path(tmpdir) / "profiles" / "users" / "default" / "xiaoya",
             )
 
 

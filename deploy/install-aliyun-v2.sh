@@ -120,12 +120,19 @@ rsync -a --delete \
 
 mkdir -p "$APP_DIR/data" "$APP_DIR/logs" "$PLAYWRIGHT_USER_DATA_DIR" "$DEBUG_DUMP_DIR"
 
+if [ -d "$PLAYWRIGHT_USER_DATA_DIR/xiaoya" ] \
+  && [ ! -d "$PLAYWRIGHT_USER_DATA_DIR/users/default/xiaoya/Default" ]; then
+  log "copying existing v2 Xiaoya browser profile to default user scope"
+  mkdir -p "$PLAYWRIGHT_USER_DATA_DIR/users/default"
+  cp -a "$PLAYWRIGHT_USER_DATA_DIR/xiaoya" "$PLAYWRIGHT_USER_DATA_DIR/users/default/xiaoya"
+fi
+
 if [ "$MIGRATE_OLD_PROFILE" = "1" ] \
   && [ -d "$OLD_PROFILE_DIR" ] \
-  && [ ! -d "$PLAYWRIGHT_USER_DATA_DIR/xiaoya/Default" ]; then
+  && [ ! -d "$PLAYWRIGHT_USER_DATA_DIR/users/default/xiaoya/Default" ]; then
   log "copying existing Xiaoya browser profile from old deployment"
-  mkdir -p "$PLAYWRIGHT_USER_DATA_DIR"
-  cp -a "$OLD_PROFILE_DIR" "$PLAYWRIGHT_USER_DATA_DIR/xiaoya"
+  mkdir -p "$PLAYWRIGHT_USER_DATA_DIR/users/default"
+  cp -a "$OLD_PROFILE_DIR" "$PLAYWRIGHT_USER_DATA_DIR/users/default/xiaoya"
 fi
 
 if [ "$MIGRATE_OLD_PROFILE" = "1" ] \
@@ -303,7 +310,8 @@ homework-watcher v2 deployment
 URL: http://$PUBLIC_IP/
 Health: http://$PUBLIC_IP/health
 noVNC URL: http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
-Login helper: homework-watcher-v2-login-xiaoya
+Web login: http://$PUBLIC_IP/
+Xiaoya CLI login helper: homework-watcher-v2-login-xiaoya
 Environment file: $ENV_FILE
 Service: homework-watcher-v2
 Log: journalctl -u homework-watcher-v2 -n 200 --no-pager

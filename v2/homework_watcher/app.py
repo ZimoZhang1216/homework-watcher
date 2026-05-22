@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
                     <a class="button-link" href="/assignments">查看所有记录</a>
                   </div>
                 </section>
-                {render_yuketang_login_panel(login_status)}
+                {render_platform_login_panel(login_status)}
                 """,
                 settings=settings,
             )
@@ -143,25 +143,24 @@ def create_app() -> FastAPI:
 
     @app.post("/login/changjiang-yuketang")
     async def start_yuketang_login():
-        try:
-            await login_manager.start_yuketang(
-                settings,
-                user_key=DEFAULT_USER_KEY,
-                user_label=DEFAULT_USER_LABEL,
-            )
-        except Exception as exc:  # noqa: BLE001 - return the operator-facing failure.
-            return HTMLResponse(
-                render_page(
-                    "长江雨课堂登录启动失败",
-                    render_message_panel(
-                        "长江雨课堂登录启动失败",
-                        f"{type(exc).__name__}: {exc}",
-                        back_href="/",
-                    ),
-                    settings=settings,
-                ),
-                status_code=500,
-            )
+        response = await start_platform_login(
+            login_manager.start_yuketang,
+            settings,
+            failure_title="长江雨课堂登录启动失败",
+        )
+        if response is not None:
+            return response
+        return RedirectResponse("/remote-login", status_code=303)
+
+    @app.post("/login/xiaoya")
+    async def start_xiaoya_login():
+        response = await start_platform_login(
+            login_manager.start_xiaoya,
+            settings,
+            failure_title="小雅登录启动失败",
+        )
+        if response is not None:
+            return response
         return RedirectResponse("/remote-login", status_code=303)
 
     @app.get("/remote-login", response_class=HTMLResponse)
@@ -197,7 +196,30 @@ def create_app() -> FastAPI:
     return app
 
 
-def render_yuketang_login_panel(status) -> str:
+async def start_platform_login(starter, settings, *, failure_title: str):
+    try:
+        await starter(
+            settings,
+            user_key=DEFAULT_USER_KEY,
+            user_label=DEFAULT_USER_LABEL,
+        )
+    except Exception as exc:  # noqa: BLE001 - return the operator-facing failure.
+        return HTMLResponse(
+            render_page(
+                failure_title,
+                render_message_panel(
+                    failure_title,
+                    f"{type(exc).__name__}: {exc}",
+                    back_href="/",
+                ),
+                settings=settings,
+            ),
+            status_code=500,
+        )
+    return None
+
+
+def render_platform_login_panel(status) -> str:
     if status is not None:
         return f"""
         <section class="panel login-panel">
@@ -215,12 +237,15 @@ def render_yuketang_login_panel(status) -> str:
     <section class="panel login-panel">
       <div class="panel-title">
         <h2>平台登录</h2>
-        <span class="count">1</span>
+        <span class="count">2</span>
       </div>
-      <p class="muted">打开服务器上的长江雨课堂浏览器窗口，通过 noVNC 手动登录并保存浏览器登录态。</p>
+      <p class="muted">打开服务器上的平台浏览器窗口，通过 noVNC 手动登录并保存浏览器登录态。</p>
       <div class="actions">
         <form method="post" action="/login/changjiang-yuketang">
           <button type="submit">长江雨课堂登录</button>
+        </form>
+        <form method="post" action="/login/xiaoya">
+          <button type="submit" class="secondary">小雅登录</button>
         </form>
       </div>
     </section>

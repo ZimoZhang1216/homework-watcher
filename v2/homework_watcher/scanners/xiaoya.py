@@ -8,7 +8,8 @@ from pathlib import Path
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.config_loader import KnownCourseConfig
 from homework_watcher.debug_dump import dump_debug_page
-from homework_watcher.settings import Settings, load_settings, resolve_path
+from homework_watcher.remote_login import profile_dir_for_user_platform
+from homework_watcher.settings import Settings, load_settings
 from homework_watcher.status import normalize_status
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -137,7 +138,7 @@ class XiaoyaScanner:
 
     @property
     def profile_dir(self) -> Path:
-        return resolve_path(self.settings.playwright_user_data_dir) / "xiaoya"
+        return profile_dir_for_user_platform(self.settings, "default", "xiaoya")
 
     def scan(self, context) -> list[AssignmentCandidate]:
         config = context.platform_config
@@ -336,7 +337,7 @@ def click_next_page(page: Page) -> bool:
 
 def login_xiaoya(settings: Settings | None = None) -> None:
     active_settings = settings or load_settings()
-    profile_dir = resolve_path(active_settings.playwright_user_data_dir) / "xiaoya"
+    profile_dir = profile_dir_for_user_platform(active_settings, "default", "xiaoya")
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
