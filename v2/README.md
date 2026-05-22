@@ -124,6 +124,26 @@ curl http://127.0.0.1:8080/health
 
 如需公网访问，建议用 Nginx 反向代理到 `127.0.0.1:8080`，再按阿里云安全组开放 80/443。
 
+### 阿里云一键脚本
+
+仓库根目录提供 v2 专用脚本：
+
+```bash
+bash deploy/install-aliyun-v2.sh
+```
+
+默认部署到 `http://8.141.109.80/`，停止旧版 `homework-watcher-web` 服务但保留旧数据目录 `/var/lib/homework-watcher/web`。如果旧版用户 1 的小雅浏览器 profile 存在，脚本会在 v2 profile 为空时复制一次，尽量复用已登录状态。
+
+脚本部署后可用：
+
+```bash
+systemctl status homework-watcher-v2 --no-pager
+curl http://127.0.0.1:8080/health
+homework-watcher-v2-login-xiaoya
+```
+
+`homework-watcher-v2-login-xiaoya` 会在服务器的 noVNC 桌面中打开小雅登录浏览器；noVNC 地址会写入 `/root/homework-watcher-v2-deployment.txt`。
+
 ## 验收命令
 
 ```bash
