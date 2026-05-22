@@ -5,6 +5,7 @@
 ## 当前能力
 
 - FastAPI 网页：`GET /`
+- 本地账号密码登录
 - SQLite assignments 表
 - 统一 `ScanService`：Web 按钮和 CLI 共用同一套扫描链路
 - 长江雨课堂课程作业扫描
@@ -150,20 +151,22 @@ homework-watcher-v2-login-xiaoya
 
 `homework-watcher-v2-login-xiaoya` 会在服务器的 noVNC 桌面中打开小雅登录浏览器；noVNC 地址会写入 `/root/homework-watcher-v2-deployment.txt`。
 
-## 平台登录
+## 网站账号和平台登录
 
-v2 首页提供“长江雨课堂登录”和“小雅登录”按钮。点击后服务会在服务器上的有界面 Chromium 中打开对应平台，并跳转到 noVNC 远程浏览器页面。手动登录完成后点击“我已完成登录”，服务会关闭浏览器并保留登录态。
+v2 首页需要先注册网站账号并登录。网站密码使用 PBKDF2-SHA256 哈希保存，不保存明文密码。每个网站账号只会看到自己的作业记录。
 
-当前未接入账号体系，平台 profile 使用默认账号路径：
+登录后首页提供“长江雨课堂登录”和“小雅登录”按钮。点击后服务会在服务器上的有界面 Chromium 中打开对应平台，并跳转到 noVNC 远程浏览器页面。手动登录完成后点击“我已完成登录”，服务会关闭浏览器并保留登录态。
+
+平台 profile 按网站用户名隔离：
 
 ```text
-data/playwright-user-data/users/default/changjiang-yuketang
-data/playwright-user-data/users/default/xiaoya
+data/playwright-user-data/users/<username>/changjiang-yuketang
+data/playwright-user-data/users/<username>/xiaoya
 ```
 
-后续引入多用户账号时，把 `default` 替换为登录用户 ID 即可隔离各用户的浏览器登录态。
+旧版本中已有的作业记录会迁移到 `default` 所属空间；新注册用户不会看到这些记录。
 
-点击首页“立即扫描”会读取默认账号的长江雨课堂和小雅登录态，解析作业并写入 `assignments` 表；`进行中`、`未完成`、`未提交` 等当前任务会进入待办。长江雨课堂中 `未开始/未开放` 会标记为不可完成，不进入当前待办。
+点击首页“立即扫描”会读取当前网站账号的长江雨课堂和小雅登录态，解析作业并写入该账号自己的 `assignments` 记录；`进行中`、`未完成`、`未提交` 等当前任务会进入待办。长江雨课堂中 `未开始/未开放` 会标记为不可完成，不进入当前待办。
 
 ## 验收命令
 

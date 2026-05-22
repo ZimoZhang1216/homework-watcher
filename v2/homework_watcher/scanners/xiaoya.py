@@ -231,6 +231,9 @@ class XiaoyaScanner:
     def profile_dir(self) -> Path:
         return profile_dir_for_user_platform(self.settings, "default", "xiaoya")
 
+    def profile_dir_for_user(self, user_key: str) -> Path:
+        return profile_dir_for_user_platform(self.settings, user_key, "xiaoya")
+
     def scan(self, context) -> list[AssignmentCandidate]:
         config = context.platform_config
         if config is None or not config.enabled:
@@ -240,12 +243,13 @@ class XiaoyaScanner:
             context.emit(5, "小雅：没有配置 known_courses，跳过")
             return []
 
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self.profile_dir_for_user(context.user_key)
+        profile_dir.mkdir(parents=True, exist_ok=True)
         context.emit(10, "小雅：打开浏览器登录态")
         results: list[AssignmentCandidate] = []
         with sync_playwright() as playwright:
             browser_context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
+                user_data_dir=str(profile_dir),
                 headless=self.headless,
                 viewport={"width": 1400, "height": 1000},
                 args=["--no-sandbox", "--disable-dev-shm-usage"],

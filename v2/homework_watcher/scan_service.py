@@ -36,6 +36,7 @@ class ScanResult:
     upsert_stats: UpsertStats
     errors: list[str]
     todos: list[dict[str, object]]
+    owner_key: str = "default"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -52,6 +53,7 @@ class ScanResult:
             },
             "errors": self.errors,
             "todos": self.todos,
+            "owner_key": self.owner_key,
         }
 
 
@@ -60,8 +62,11 @@ class ScanService:
         self,
         settings: Settings | None = None,
         scanners: Iterable[PlatformScanner] | None = None,
+        *,
+        user_key: str = "default",
     ) -> None:
         self.settings = settings or load_settings()
+        self.user_key = user_key
         self.configs = load_platform_configs(self.settings.config_path)
         self.logger = get_scan_logger(self.settings)
         self.session_factory = create_session_factory(self.settings)
@@ -88,6 +93,7 @@ class ScanService:
             git_commit(),
             platforms or "enabled",
         )
+        self._log(scan_id, "scan owner=%s", self.user_key)
 
         platform_keys = self._platform_keys(platforms)
         all_candidates: list[AssignmentCandidate] = []
@@ -112,6 +118,7 @@ class ScanService:
                     scan_id=scan_id,
                     platform_key=platform_key,
                     platform_config=self.configs.get(platform_key),
+                    user_key=self.user_key,
                     progress=emit_progress,
                 )
                 candidates = scanner.scan(context)
@@ -138,8 +145,8 @@ class ScanService:
         )
 
         with self.session_factory() as session:
-            stats = upsert_assignments(session, filtered)
-            todos = [assignment_to_dict(item) for item in list_todos(session)]
+            stats = upsert_assignments(session, filtered, owner_key=self.user_key)
+            todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=self.user_key)]
 
         self._log(
             scan_id,
@@ -160,6 +167,7 @@ class ScanService:
             upsert_stats=stats,
             errors=errors,
             todos=todos,
+            owner_key=self.user_key,
         )
         LAST_SCAN_RESULTS.append(result)
         del LAST_SCAN_RESULTS[:-5]
@@ -182,8 +190,13 @@ class ScanService:
 LAST_SCAN_RESULTS: list[ScanResult] = []
 
 
-def latest_scan_result() -> ScanResult | None:
-    return LAST_SCAN_RESULTS[-1] if LAST_SCAN_RESULTS else None
+def latest_scan_result(owner_key: str | None = None) -> ScanResult | None:
+    if owner_key is None:
+        return LAST_SCAN_RESULTS[-1] if LAST_SCAN_RESULTS else None
+    for result in reversed(LAST_SCAN_RESULTS):
+        if result.owner_key == owner_key:
+            return result
+    return None
 
 
 def scanner_source_path(scanner_cls) -> str:

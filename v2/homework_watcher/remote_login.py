@@ -35,7 +35,7 @@ class LoginStatus:
 
 class RemoteLoginManager:
     def __init__(self) -> None:
-        self.active: dict[str, object] | None = None
+        self.active: dict[str, dict[str, object]] = {}
 
     async def start_yuketang(
         self,
@@ -84,8 +84,9 @@ class RemoteLoginManager:
         prepare_page=None,
     ) -> LoginStatus:
         await self.close_expired()
-        if self.active is not None:
-            return self.status()  # type: ignore[return-value]
+        active = self.active.get(user_key)
+        if active is not None:
+            return self.status(user_key)  # type: ignore[return-value]
 
         profile_dir = profile_dir_for_user_platform(settings, user_key, slug)
         profile_dir.mkdir(parents=True, exist_ok=True)
@@ -113,7 +114,7 @@ class RemoteLoginManager:
             await playwright.stop()
             raise
 
-        self.active = {
+        self.active[user_key] = {
             "platform": platform,
             "slug": slug,
             "user_key": user_key,
@@ -123,38 +124,57 @@ class RemoteLoginManager:
             "playwright": playwright,
             "context": context,
         }
-        return self.status()  # type: ignore[return-value]
+        return self.status(user_key)  # type: ignore[return-value]
 
-    async def finish(self) -> None:
-        active = self.active
-        self.active = None
+    async def finish(self, user_key: str | None = None) -> None:
+        if user_key is None:
+            active_items = list(self.active.items())
+            self.active.clear()
+        else:
+            active = self.active.pop(user_key, None)
+            active_items = [(user_key, active)] if active is not None else []
+        for _key, active in active_items:
+            await close_active_login(active)
+
+    async def close_expired(self, user_key: str | None = None) -> None:
+        if user_key is not None:
+            status = self.status(user_key)
+            if status is not None and status.expires_in_seconds <= 0:
+                await self.finish(user_key)
+            return
+        for key in list(self.active):
+            status = self.status(key)
+            if status is not None and status.expires_in_seconds <= 0:
+                await self.finish(key)
+
+    def status(self, user_key: str | None = None) -> LoginStatus | None:
+        if user_key is None:
+            if not self.active:
+                return None
+            active = next(iter(self.active.values()))
+        else:
+            active = self.active.get(user_key)
         if active is None:
             return
-        context = active.get("context")
-        playwright = active.get("playwright")
-        if context is not None:
-            await context.close()
-        if playwright is not None:
-            await playwright.stop()
-
-    async def close_expired(self) -> None:
-        status = self.status()
-        if status is not None and status.expires_in_seconds <= 0:
-            await self.finish()
-
-    def status(self) -> LoginStatus | None:
-        if self.active is None:
-            return None
-        started = float(self.active.get("started_monotonic", time.monotonic()))
+        started = float(active.get("started_monotonic", time.monotonic()))
         expires_in = max(0, int(LOGIN_SESSION_TTL_SECONDS - (time.monotonic() - started)))
         return LoginStatus(
-            platform=str(self.active["platform"]),
-            slug=str(self.active["slug"]),
-            user_key=str(self.active["user_key"]),
-            user_label=str(self.active["user_label"]),
-            started_at=str(self.active["started_at"]),
+            platform=str(active["platform"]),
+            slug=str(active["slug"]),
+            user_key=str(active["user_key"]),
+            user_label=str(active["user_label"]),
+            started_at=str(active["started_at"]),
             expires_in_seconds=expires_in,
         )
+
+
+async def close_active_login(active: dict[str, object]) -> None:
+    context = active.get("context")
+    playwright = active.get("playwright")
+    if context is not None:
+        await context.close()
+    if playwright is not None:
+        await playwright.stop()
 
 
 async def prefer_student_entry(context) -> None:

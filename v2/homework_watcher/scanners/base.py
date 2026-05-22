@@ -15,6 +15,7 @@ class ScannerContext:
     scan_id: str
     platform_key: str
     platform_config: PlatformConfig | None
+    user_key: str = "default"
     progress: ProgressCallback | None = None
 
     def emit(self, percent: int, message: str) -> None:

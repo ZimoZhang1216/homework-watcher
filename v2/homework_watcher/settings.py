@@ -20,6 +20,7 @@ class Settings:
     playwright_user_data_dir: Path
     host: str
     port: int
+    session_secret: str = "dev-insecure-session-secret"
 
     @property
     def database_path(self) -> Path:
@@ -50,6 +51,7 @@ def load_settings() -> Settings:
         ),
         host=get_value("HOST", "127.0.0.1"),
         port=int(get_value("PORT", "8080")),
+        session_secret=get_value("APP_SECRET_KEY", "dev-insecure-session-secret"),
     )
 
 

@@ -5,12 +5,33 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from sqlalchemy import Engine, create_engine, select
+from sqlalchemy import Engine, create_engine, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .candidates import AssignmentCandidate
 from .models import Assignment, Base
 from .settings import Settings, load_settings
+
+
+DEFAULT_OWNER_KEY = "default"
+ASSIGNMENT_COPY_COLUMNS = [
+    "id",
+    "platform",
+    "course",
+    "title",
+    "status_raw",
+    "status_normalized",
+    "due_at",
+    "url",
+    "source_key",
+    "fingerprint",
+    "is_todo",
+    "first_seen_at",
+    "last_seen_at",
+    "created_at",
+    "updated_at",
+    "raw_snapshot",
+]
 
 
 @dataclass(frozen=True)
@@ -36,7 +57,36 @@ def create_session_factory(settings: Settings | None = None) -> sessionmaker[Ses
 
 def init_db(settings: Settings | None = None) -> None:
     engine = create_db_engine(settings)
+    migrate_assignment_owner_key(engine)
     Base.metadata.create_all(engine)
+
+
+def migrate_assignment_owner_key(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "assignments" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("assignments")}
+    if "owner_key" in columns:
+        return
+
+    legacy_table = "assignments_legacy_owner_migration"
+    with engine.begin() as connection:
+        connection.execute(text(f"DROP TABLE IF EXISTS {legacy_table}"))
+        connection.execute(text(f"ALTER TABLE assignments RENAME TO {legacy_table}"))
+
+    Base.metadata.create_all(engine)
+
+    copy_columns = [column for column in ASSIGNMENT_COPY_COLUMNS if column in columns]
+    insert_columns = ["owner_key", *copy_columns]
+    select_columns = [f"'{DEFAULT_OWNER_KEY}'", *copy_columns]
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                f"INSERT INTO assignments ({', '.join(insert_columns)}) "
+                f"SELECT {', '.join(select_columns)} FROM {legacy_table}"
+            )
+        )
+        connection.execute(text(f"DROP TABLE {legacy_table}"))
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -44,7 +94,11 @@ def ensure_parent_dir(path: Path) -> None:
 
 
 def upsert_assignments(
-    session: Session, candidates: Iterable[AssignmentCandidate], *, now: datetime | None = None
+    session: Session,
+    candidates: Iterable[AssignmentCandidate],
+    *,
+    owner_key: str = DEFAULT_OWNER_KEY,
+    now: datetime | None = None,
 ) -> UpsertStats:
     timestamp = now or datetime.now()
     inserted = 0
@@ -58,6 +112,7 @@ def upsert_assignments(
 
         existing = session.scalar(
             select(Assignment).where(
+                Assignment.owner_key == owner_key,
                 Assignment.platform == candidate.platform,
                 Assignment.course == candidate.course,
                 Assignment.title == candidate.title,
@@ -67,6 +122,7 @@ def upsert_assignments(
         if existing is None:
             session.add(
                 Assignment(
+                    owner_key=owner_key,
                     platform=candidate.platform,
                     course=candidate.course,
                     title=candidate.title,
@@ -102,20 +158,20 @@ def upsert_assignments(
     return UpsertStats(inserted=inserted, updated=updated, skipped=skipped)
 
 
-def list_todos(session: Session) -> list[Assignment]:
+def list_todos(session: Session, *, owner_key: str = DEFAULT_OWNER_KEY) -> list[Assignment]:
     return list(
         session.scalars(
             select(Assignment)
-            .where(Assignment.is_todo.is_(True))
+            .where(Assignment.owner_key == owner_key, Assignment.is_todo.is_(True))
             .order_by(Assignment.due_at.asc(), Assignment.platform.asc(), Assignment.course.asc())
         )
     )
 
 
-def list_assignments(session: Session) -> list[Assignment]:
+def list_assignments(session: Session, *, owner_key: str = DEFAULT_OWNER_KEY) -> list[Assignment]:
     return list(
         session.scalars(
-            select(Assignment).order_by(
+            select(Assignment).where(Assignment.owner_key == owner_key).order_by(
                 Assignment.platform.asc(), Assignment.course.asc(), Assignment.due_at.asc()
             )
         )
@@ -125,6 +181,7 @@ def list_assignments(session: Session) -> list[Assignment]:
 def assignment_to_dict(assignment: Assignment) -> dict[str, str | int | bool]:
     return {
         "id": assignment.id,
+        "owner_key": assignment.owner_key,
         "platform": assignment.platform,
         "course": assignment.course,
         "title": assignment.title,

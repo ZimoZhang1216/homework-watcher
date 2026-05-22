@@ -5,8 +5,20 @@ from html import escape
 
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from .auth import (
+    AUTH_COOKIE_NAME,
+    AuthError,
+    CurrentUser,
+    authenticate_user,
+    create_session_token,
+    create_user,
+    get_user,
+    parse_urlencoded_form,
+    read_session_username,
+    user_to_current,
+)
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
@@ -15,8 +27,7 @@ from .scan_service import ScanService, latest_scan_result
 from .settings import load_settings
 
 
-DEFAULT_USER_KEY = "default"
-DEFAULT_USER_LABEL = "默认账号"
+LOGIN_PATH = "/login"
 
 
 def create_app() -> FastAPI:
@@ -37,10 +48,13 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/", response_class=HTMLResponse)
-    def index():
+    def index(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
         with session_factory() as session:
-            todos = [assignment_to_dict(item) for item in list_todos(session)]
-        login_status = login_manager.status()
+            todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=user.username)]
+        login_status = login_manager.status(user.username)
         return HTMLResponse(
             render_page(
                 "当前待办",
@@ -62,29 +76,89 @@ def create_app() -> FastAPI:
                 {render_platform_login_panel(login_status)}
                 """,
                 settings=settings,
+                user=user,
             )
         )
 
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is not None:
+            return RedirectResponse("/", status_code=303)
+        error = request.query_params.get("error", "")
+        return HTMLResponse(render_page("登录", render_auth_panel(error), settings=settings))
+
+    @app.post("/login")
+    async def login(request: Request):
+        fields = parse_urlencoded_form(await request.body())
+        with session_factory() as session:
+            user = authenticate_user(
+                session,
+                username=fields.get("username", ""),
+                password=fields.get("password", ""),
+            )
+        if user is None:
+            return redirect_to_login("用户名或密码不正确。")
+        response = RedirectResponse("/", status_code=303)
+        set_auth_cookie(response, user.username, settings)
+        return response
+
+    @app.post("/register")
+    async def register(request: Request):
+        fields = parse_urlencoded_form(await request.body())
+        try:
+            with session_factory() as session:
+                user = create_user(
+                    session,
+                    username=fields.get("username", ""),
+                    password=fields.get("password", ""),
+                    display_name=fields.get("display_name", ""),
+                )
+        except AuthError as exc:
+            return redirect_to_login(str(exc))
+        response = RedirectResponse("/", status_code=303)
+        set_auth_cookie(response, user.username, settings)
+        return response
+
+    @app.post("/logout")
+    async def logout(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is not None:
+            await login_manager.finish(user.username)
+        response = RedirectResponse(LOGIN_PATH, status_code=303)
+        response.delete_cookie(AUTH_COOKIE_NAME)
+        return response
+
     @app.post("/scan")
-    def scan(redirect: bool = Query(False)):
-        result = ScanService(settings).run_scan()
+    def scan(request: Request, redirect: bool = Query(False)):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return RedirectResponse(LOGIN_PATH, status_code=303) if redirect else login_required_json()
+        result = ScanService(settings, user_key=user.username).run_scan()
         if redirect:
             return RedirectResponse("/", status_code=303)
         return result.to_dict()
 
     @app.get("/api/todos")
-    def api_todos():
+    def api_todos(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
         with session_factory() as session:
-            return [assignment_to_dict(item) for item in list_todos(session)]
+            return [assignment_to_dict(item) for item in list_todos(session, owner_key=user.username)]
 
     @app.get("/api/assignments")
     def api_assignments(
+        request: Request,
         platform: str | None = None,
         course: str | None = None,
         status: str | None = None,
     ):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
         with session_factory() as session:
-            items = [assignment_to_dict(item) for item in list_assignments(session)]
+            items = [assignment_to_dict(item) for item in list_assignments(session, owner_key=user.username)]
         if platform:
             items = [item for item in items if item["platform"] == platform]
         if course:
@@ -98,14 +172,20 @@ def create_app() -> FastAPI:
         return items
 
     @app.get("/api/scans/latest")
-    def api_latest_scan():
-        result = latest_scan_result()
+    def api_latest_scan(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
+        result = latest_scan_result(user.username)
         return result.to_dict() if result else {"scan": None}
 
     @app.get("/assignments", response_class=HTMLResponse)
-    def assignments_page():
+    def assignments_page(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
         with session_factory() as session:
-            items = [assignment_to_dict(item) for item in list_assignments(session)]
+            items = [assignment_to_dict(item) for item in list_assignments(session, owner_key=user.username)]
         return HTMLResponse(
             render_page(
                 "所有记录",
@@ -120,12 +200,16 @@ def create_app() -> FastAPI:
                 </section>
                 """,
                 settings=settings,
+                user=user,
             )
         )
 
     @app.get("/logs/latest", response_class=HTMLResponse)
-    def latest_logs_page():
-        lines = read_latest_scan_log(settings)
+    def latest_logs_page(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        lines = read_latest_scan_log(settings, owner_key=user.username)
         content = "\n".join(escape(line) for line in lines) or "暂无扫描日志。"
         return HTMLResponse(
             render_page(
@@ -138,14 +222,19 @@ def create_app() -> FastAPI:
                 </section>
                 """,
                 settings=settings,
+                user=user,
             )
         )
 
     @app.post("/login/changjiang-yuketang")
-    async def start_yuketang_login():
+    async def start_yuketang_login(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
         response = await start_platform_login(
             login_manager.start_yuketang,
             settings,
+            user=user,
             failure_title="长江雨课堂登录启动失败",
         )
         if response is not None:
@@ -153,10 +242,14 @@ def create_app() -> FastAPI:
         return RedirectResponse("/remote-login", status_code=303)
 
     @app.post("/login/xiaoya")
-    async def start_xiaoya_login():
+    async def start_xiaoya_login(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
         response = await start_platform_login(
             login_manager.start_xiaoya,
             settings,
+            user=user,
             failure_title="小雅登录启动失败",
         )
         if response is not None:
@@ -165,14 +258,18 @@ def create_app() -> FastAPI:
 
     @app.get("/remote-login", response_class=HTMLResponse)
     async def remote_login(request: Request):
-        await login_manager.close_expired()
-        status = login_manager.status()
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        await login_manager.close_expired(user.username)
+        status = login_manager.status(user.username)
         if status is None:
             return HTMLResponse(
                 render_page(
                     "远程登录",
                     render_message_panel("没有远程登录会话", "请从首页打开长江雨课堂登录。", back_href="/"),
                     settings=settings,
+                    user=user,
                 )
             )
         return HTMLResponse(
@@ -180,28 +277,69 @@ def create_app() -> FastAPI:
                 "远程登录",
                 render_remote_login_panel(status, build_novnc_url(str(request.base_url))),
                 settings=settings,
+                user=user,
             )
         )
 
     @app.post("/remote-login/finish")
-    async def finish_remote_login():
-        await login_manager.finish()
+    async def finish_remote_login(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        await login_manager.finish(user.username)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/remote-login/cancel")
-    async def cancel_remote_login():
-        await login_manager.finish()
+    async def cancel_remote_login(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        await login_manager.finish(user.username)
         return RedirectResponse("/", status_code=303)
 
     return app
 
 
-async def start_platform_login(starter, settings, *, failure_title: str):
+def current_user_from_request(request: Request, session_factory, settings) -> CurrentUser | None:
+    username = read_session_username(request.cookies.get(AUTH_COOKIE_NAME), settings.session_secret)
+    if username is None:
+        return None
+    with session_factory() as session:
+        user = get_user(session, username)
+        if user is None:
+            return None
+        return user_to_current(user)
+
+
+def set_auth_cookie(response, username: str, settings) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        create_session_token(username, settings.session_secret),
+        httponly=True,
+        samesite="lax",
+        max_age=14 * 24 * 60 * 60,
+    )
+
+
+def redirect_to_login(error: str = "") -> RedirectResponse:
+    target = LOGIN_PATH
+    if error:
+        from urllib.parse import urlencode
+
+        target = f"{LOGIN_PATH}?{urlencode({'error': error})}"
+    return RedirectResponse(target, status_code=303)
+
+
+def login_required_json() -> JSONResponse:
+    return JSONResponse({"error": "login_required"}, status_code=401)
+
+
+async def start_platform_login(starter, settings, *, user: CurrentUser, failure_title: str):
     try:
         await starter(
             settings,
-            user_key=DEFAULT_USER_KEY,
-            user_label=DEFAULT_USER_LABEL,
+            user_key=user.username,
+            user_label=user.display_name,
         )
     except Exception as exc:  # noqa: BLE001 - return the operator-facing failure.
         return HTMLResponse(
@@ -213,10 +351,37 @@ async def start_platform_login(starter, settings, *, failure_title: str):
                     back_href="/",
                 ),
                 settings=settings,
+                user=user,
             ),
             status_code=500,
         )
     return None
+
+
+def render_auth_panel(error: str = "") -> str:
+    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    return f"""
+    <section class="panel auth-panel">
+      <div>
+        <h2>登录</h2>
+        {error_html}
+        <form method="post" action="/login" class="auth-form">
+          <label>用户名<input name="username" autocomplete="username" required></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+          <button type="submit">登录</button>
+        </form>
+      </div>
+      <div>
+        <h2>注册</h2>
+        <form method="post" action="/register" class="auth-form">
+          <label>用户名<input name="username" autocomplete="username" required></label>
+          <label>显示名<input name="display_name" autocomplete="name"></label>
+          <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+          <button type="submit" class="secondary">创建账号</button>
+        </form>
+      </div>
+    </section>
+    """
 
 
 def render_platform_login_panel(status) -> str:
@@ -224,14 +389,14 @@ def render_platform_login_panel(status) -> str:
         return f"""
         <section class="panel login-panel">
           <div class="panel-title">
-            <h2>平台登录</h2>
-            <span class="count">开</span>
-          </div>
-          <p class="muted">长江雨课堂远程登录窗口已打开，剩余 {escape(str(status.expires_in_seconds // 60))} 分钟。</p>
-          <div class="actions">
-            <a class="button-link" href="/remote-login">继续登录</a>
-          </div>
-        </section>
+	            <h2>平台登录</h2>
+	            <span class="count">开</span>
+	          </div>
+	          <p class="muted">{escape(status.platform)} 远程登录窗口已打开，剩余 {escape(str(status.expires_in_seconds // 60))} 分钟。</p>
+	          <div class="actions">
+	            <a class="button-link" href="/remote-login">继续登录</a>
+	          </div>
+	        </section>
         """
     return """
     <section class="panel login-panel">
@@ -311,7 +476,15 @@ def render_assignment_table(assignments: list[dict[str, object]]) -> str:
     )
 
 
-def render_page(title: str, body: str, *, settings) -> str:
+def render_page(title: str, body: str, *, settings, user: CurrentUser | None = None) -> str:
+    account_html = ""
+    if user is not None:
+        account_html = f"""
+        <div class="account">
+          <span>{escape(user.display_name)}</span>
+          <form method="post" action="/logout"><button type="submit" class="secondary compact">退出</button></form>
+        </div>
+        """
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -321,9 +494,9 @@ def render_page(title: str, body: str, *, settings) -> str:
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f2; color: #1f2924; }}
     main {{ max-width: 1120px; margin: 0 auto; padding: 48px 24px; }}
-    header {{ display: flex; justify-content: space-between; gap: 24px; align-items: baseline; margin-bottom: 28px; }}
-    h1 {{ font-size: 34px; margin: 0; letter-spacing: 0; }}
-    h2 {{ margin-top: 0; }}
+	    header {{ display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 28px; }}
+	    h1 {{ font-size: 34px; margin: 0; letter-spacing: 0; }}
+	    h2 {{ margin-top: 0; }}
     .badge {{ border: 1px solid #9ab5a8; color: #1f6b4b; border-radius: 6px; padding: 2px 8px; font-weight: 700; }}
     .panel {{ background: #fff; border: 1px solid #d8ded6; border-radius: 8px; padding: 24px; }}
     .panel-title {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
@@ -333,26 +506,36 @@ def render_page(title: str, body: str, *, settings) -> str:
     th, td {{ text-align: left; padding: 12px 10px; border-top: 1px solid #e2e6df; vertical-align: top; }}
     th {{ color: #66736d; font-size: 14px; }}
     a {{ color: #145f45; }}
-    button, .button-link {{ display: inline-flex; align-items: center; min-height: 42px; border: 1px solid #1f6b4b; background: #1f6b4b; color: #fff; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }}
-    button.secondary {{ background: #fff; color: #1f6b4b; }}
-    .button-link {{ background: #fff; color: #1f6b4b; }}
-    .primary-link {{ background: #1f6b4b; color: #fff; }}
-    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
-    .login-panel {{ margin-top: 18px; }}
+	    button, .button-link {{ display: inline-flex; align-items: center; min-height: 42px; border: 1px solid #1f6b4b; background: #1f6b4b; color: #fff; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }}
+	    button.secondary {{ background: #fff; color: #1f6b4b; }}
+	    button.compact {{ min-height: 32px; padding: 0 10px; }}
+	    .button-link {{ background: #fff; color: #1f6b4b; }}
+	    .primary-link {{ background: #1f6b4b; color: #fff; }}
+	    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
+	    .account {{ display: flex; align-items: center; gap: 12px; color: #66736d; }}
+	    .auth-panel {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }}
+	    .auth-form {{ display: grid; gap: 14px; }}
+	    label {{ display: grid; gap: 6px; color: #66736d; font-weight: 700; }}
+	    input {{ min-height: 40px; border: 1px solid #cfd8d0; border-radius: 6px; padding: 0 10px; font: inherit; }}
+	    .error {{ color: #9b1c1c; font-weight: 700; }}
+	    .login-panel {{ margin-top: 18px; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
     .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
     .label {{ display: inline-block; min-width: 72px; color: #66736d; font-weight: 700; }}
     pre {{ white-space: pre-wrap; word-break: break-word; background: #f2f4ef; border-radius: 6px; padding: 16px; max-height: 560px; overflow: auto; }}
     footer {{ margin-top: 32px; color: #66736d; font-size: 14px; }}
-    @media (max-width: 720px) {{ .remote-panel {{ grid-template-columns: 1fr; }} }}
-  </style>
+	    @media (max-width: 720px) {{ .remote-panel, .auth-panel {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; flex-direction: column; }} }}
+	  </style>
 </head>
 <body>
   <main>
-    <header>
-      <h1>作业提醒网站 <span class="badge">{escape(settings.app_version)}</span></h1>
-      <span>{escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</span>
-    </header>
+	    <header>
+	      <h1>作业提醒网站 <span class="badge">{escape(settings.app_version)}</span></h1>
+	      <div class="account">
+	        <span>{escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</span>
+	        {account_html}
+	      </div>
+	    </header>
     {body}
     <footer>commit {escape(git_commit())} · database {escape(str(settings.database_path))}</footer>
   </main>

@@ -46,18 +46,22 @@ class ChangjiangYuketangScanner:
     def profile_dir(self) -> Path:
         return profile_dir_for_user_platform(self.settings, "default", CHANGJIANG_PLATFORM_KEY)
 
+    def profile_dir_for_user(self, user_key: str) -> Path:
+        return profile_dir_for_user_platform(self.settings, user_key, CHANGJIANG_PLATFORM_KEY)
+
     def scan(self, context) -> list[AssignmentCandidate]:
         config = context.platform_config
         if config is not None and not config.enabled:
             context.emit(5, "长江雨课堂：未启用，跳过")
             return []
 
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self.profile_dir_for_user(context.user_key)
+        profile_dir.mkdir(parents=True, exist_ok=True)
         start_url = config.base_url if config is not None and config.base_url else DEFAULT_YUKETANG_URL
         context.emit(10, "长江雨课堂：打开浏览器登录态")
         with sync_playwright() as playwright:
             browser_context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
+                user_data_dir=str(profile_dir),
                 headless=self.headless,
                 locale="zh-CN",
                 viewport={"width": 1440, "height": 1000},

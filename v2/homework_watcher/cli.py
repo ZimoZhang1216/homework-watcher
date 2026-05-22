@@ -19,10 +19,12 @@ def main(argv: list[str] | None = None) -> int:
     health_parser.set_defaults(handler=cmd_health)
 
     db_list_parser = subparsers.add_parser("db-list", help="输出 assignments 表记录")
+    db_list_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
     db_list_parser.set_defaults(handler=cmd_db_list)
 
     scan_parser = subparsers.add_parser("scan", help="执行统一扫描服务")
     scan_parser.add_argument("--platform", action="append", dest="platforms", help="限制扫描平台，可重复")
+    scan_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
     scan_parser.set_defaults(handler=cmd_scan)
 
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
@@ -31,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_known_xiaoya_parser = subparsers.add_parser(
         "scan-known-xiaoya", help="扫描小雅配置的 known_courses 并输出诊断结果"
     )
+    scan_known_xiaoya_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
     scan_known_xiaoya_parser.set_defaults(handler=cmd_scan_known_xiaoya)
 
     args = parser.parse_args(argv)
@@ -59,19 +62,19 @@ def cmd_health(_args) -> int:
     return 0
 
 
-def cmd_db_list(_args) -> int:
+def cmd_db_list(args) -> int:
     settings = load_settings()
     init_db(settings)
     session_factory = create_session_factory(settings)
     with session_factory() as session:
-        items = [assignment_to_dict(item) for item in list_assignments(session)]
+        items = [assignment_to_dict(item) for item in list_assignments(session, owner_key=args.user)]
     print(json.dumps(items, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_scan(args) -> int:
     settings = load_settings()
-    result = ScanService(settings).run_scan(platforms=args.platforms)
+    result = ScanService(settings, user_key=args.user).run_scan(platforms=args.platforms)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if not result.errors else 1
 
@@ -83,12 +86,12 @@ def cmd_login_xiaoya(_args) -> int:
 
 def cmd_scan_known_xiaoya(_args) -> int:
     settings = load_settings()
-    result = ScanService(settings).run_scan(platforms=["xiaoya"])
+    result = ScanService(settings, user_key=_args.user).run_scan(platforms=["xiaoya"])
     init_db(settings)
     session_factory = create_session_factory(settings)
     with session_factory() as session:
-        assignments = [assignment_to_dict(item) for item in list_assignments(session)]
-        todos = [assignment_to_dict(item) for item in list_todos(session)]
+        assignments = [assignment_to_dict(item) for item in list_assignments(session, owner_key=_args.user)]
+        todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=_args.user)]
 
     xiaoya_assignments = [item for item in assignments if item["platform"] == "小雅"]
     xiaoya_todos = [item for item in todos if item["platform"] == "小雅"]

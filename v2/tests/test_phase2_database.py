@@ -5,6 +5,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import create_engine, text
+
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.database import create_session_factory, init_db, list_assignments, list_todos, upsert_assignments
 from homework_watcher.settings import Settings
@@ -79,6 +81,83 @@ class Phase2DatabaseTests(unittest.TestCase):
                 self.assertEqual(stats.updated, 1)
                 self.assertEqual(len(list_assignments(session)), 2)
                 self.assertEqual(list_todos(session), [])
+
+    def test_assignments_are_owner_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = test_settings(f"sqlite:///{Path(tmpdir) / 'homework.sqlite3'}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+            candidate = AssignmentCandidate(
+                platform="长江雨课堂",
+                course="大学物理",
+                title="第6章作业",
+                status_raw="未提交",
+                due_at=datetime(2026, 5, 26, 8, 0),
+                url="https://example.test/task",
+            )
+
+            with session_factory() as session:
+                first = upsert_assignments(session, [candidate], owner_key="alice")
+                second = upsert_assignments(session, [candidate], owner_key="bob")
+
+            self.assertEqual((first.inserted, second.inserted), (1, 1))
+            with session_factory() as session:
+                self.assertEqual([item.owner_key for item in list_todos(session, owner_key="alice")], ["alice"])
+                self.assertEqual([item.owner_key for item in list_todos(session, owner_key="bob")], ["bob"])
+                self.assertEqual(list_todos(session, owner_key="carol"), [])
+
+    def test_old_assignment_table_migrates_to_default_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "homework.sqlite3"
+            engine = create_engine(f"sqlite:///{db_path}", future=True)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE assignments (
+                          id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          platform VARCHAR(80) NOT NULL,
+                          course VARCHAR(200) NOT NULL,
+                          title VARCHAR(300) NOT NULL,
+                          status_raw VARCHAR(80) NOT NULL,
+                          status_normalized VARCHAR(40) NOT NULL,
+                          due_at DATETIME NOT NULL,
+                          url TEXT NOT NULL,
+                          source_key VARCHAR(300) NOT NULL,
+                          fingerprint VARCHAR(64) NOT NULL,
+                          is_todo BOOLEAN NOT NULL,
+                          first_seen_at DATETIME NOT NULL,
+                          last_seen_at DATETIME NOT NULL,
+                          created_at DATETIME NOT NULL,
+                          updated_at DATETIME NOT NULL,
+                          raw_snapshot TEXT NOT NULL,
+                          CONSTRAINT uq_assignment_identity UNIQUE (platform, course, title, due_at)
+                        )
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO assignments (
+                          platform, course, title, status_raw, status_normalized, due_at,
+                          url, source_key, fingerprint, is_todo,
+                          first_seen_at, last_seen_at, created_at, updated_at, raw_snapshot
+                        ) VALUES (
+                          '小雅', '结构化学', '作业-08', '进行中', 'in_progress', '2026-05-22 23:59:59',
+                          'https://example.test', '', 'fp', 1,
+                          '2026-05-20 10:00:00', '2026-05-20 10:00:00',
+                          '2026-05-20 10:00:00', '2026-05-20 10:00:00', ''
+                        )
+                        """
+                    )
+                )
+
+            settings = test_settings(f"sqlite:///{db_path}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+            with session_factory() as session:
+                self.assertEqual([item.owner_key for item in list_assignments(session)], ["default"])
 
 
 if __name__ == "__main__":

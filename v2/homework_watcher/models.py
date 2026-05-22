@@ -10,13 +10,25 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class Assignment(Base):
     __tablename__ = "assignments"
     __table_args__ = (
-        UniqueConstraint("platform", "course", "title", "due_at", name="uq_assignment_identity"),
+        UniqueConstraint("owner_key", "platform", "course", "title", "due_at", name="uq_assignment_owner_identity"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_key: Mapped[str] = mapped_column(String(120), nullable=False, default="default", index=True)
     platform: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     course: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
