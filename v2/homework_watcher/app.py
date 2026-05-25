@@ -621,14 +621,16 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>{escape(title)} - homework-watcher v2</title>
+  <title>{escape(title)} - NKU作业提醒系统</title>
   <style>
     :root {{
       color-scheme: light;
-      --primary: #7e0c6e;
-      --primary-strong: #5f0754;
+      --nankai-purple-rgb: 126, 12, 110;
+      --nankai-purple-hex: #711a5f;
+      --primary: var(--nankai-purple-hex);
+      --primary-strong: rgb(var(--nankai-purple-rgb));
       --primary-soft: #f3e4f1;
-      --primary-ring: rgba(126, 12, 110, 0.24);
+      --primary-ring: rgba(var(--nankai-purple-rgb), 0.24);
       --accent: #b79042;
       --bg: #f8f5fa;
       --surface: #ffffff;
@@ -816,7 +818,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
 <body>
   <main>
 	    <header>
-	      <h1>作业提醒网站 <span class="badge">{escape(settings.app_version)}</span></h1>
+	      <h1>NKU作业提醒系统 <span class="badge">{escape(settings.app_version)}</span></h1>
 	      <div class="account">
 	        <span>{escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</span>
 	        {account_html}
