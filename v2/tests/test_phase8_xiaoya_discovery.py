@@ -5,9 +5,11 @@ import unittest
 from homework_watcher.config_loader import KnownCourseConfig, parse_platform_config
 from homework_watcher.scanners.xiaoya_discovery import (
     build_xiaoya_task_url,
+    course_name_candidates,
     extract_course_id_from_raw,
     extract_course_name_from_raw,
     merge_xiaoya_courses,
+    raw_course_candidates_from_network_payloads,
 )
 
 
@@ -84,6 +86,98 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(course_id, "1234567890123456789")
         self.assertEqual(course, "高等数学（B类）II")
+
+    def test_extract_course_from_resource_url(self) -> None:
+        raw = {
+            "href": "/app/jx-web/mycourse/6902425978165806721/resource",
+            "absolute_href": "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902425978165806721/resource",
+            "text": "大学物理学基础 II 学院：大学物理及实验 张连众 238次 91人 2026年春",
+            "attrs": "",
+            "ancestor_texts": [],
+            "ancestor_attrs": [],
+            "title_texts": [],
+        }
+
+        course_id = extract_course_id_from_raw(raw)
+        course = extract_course_name_from_raw(raw, course_id=course_id)
+        task_url = build_xiaoya_task_url(
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse",
+            course_id,
+            href=raw["absolute_href"],
+        )
+
+        self.assertEqual(course_id, "6902425978165806721")
+        self.assertEqual(course, "大学物理学基础 II")
+        self.assertEqual(
+            task_url,
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902425978165806721/task",
+        )
+
+    def test_non_numeric_mycourse_segment_is_not_course_id(self) -> None:
+        raw = {
+            "href": "/app/jx-web/mycourse/teachingvideos",
+            "absolute_href": "https://nankai.ai-augmented.com/app/jx-web/mycourse/teachingvideos",
+            "text": "所有的课",
+            "attrs": "",
+            "ancestor_texts": [],
+            "ancestor_attrs": [],
+            "title_texts": [],
+        }
+
+        self.assertEqual(extract_course_id_from_raw(raw), "")
+
+    def test_network_payload_course_candidates(self) -> None:
+        payloads = [
+            {
+                "url": "https://nankai.ai-augmented.com/api/course/list",
+                "body": """
+                {
+                  "data": [
+                    {
+                      "id": "6902425978165806721",
+                      "courseName": "大学物理学基础 II",
+                      "resourceUrl": "/app/jx-web/mycourse/6902425978165806721/resource"
+                    }
+                  ]
+                }
+                """,
+            }
+        ]
+
+        candidates = raw_course_candidates_from_network_payloads(
+            payloads,
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(extract_course_id_from_raw(candidates[0]), "6902425978165806721")
+        self.assertEqual(
+            extract_course_name_from_raw(candidates[0], course_id="6902425978165806721"),
+            "大学物理学基础 II",
+        )
+
+    def test_network_payload_ignores_generic_id_name_objects(self) -> None:
+        payloads = [
+            {
+                "url": "https://nankai.ai-augmented.com/api/user/list",
+                "body": '{"data": [{"id": "6902425978165806721", "name": "张连众"}]}',
+            }
+        ]
+
+        candidates = raw_course_candidates_from_network_payloads(
+            payloads,
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+
+        self.assertEqual(candidates, [])
+
+    def test_course_name_from_card_summary_text(self) -> None:
+        names = course_name_candidates(
+            "定量化学分析 学院：化学学院 陈明星 152次 44人 2026年春 校内公开 教务开课",
+            course_id="6902425978165806721",
+        )
+
+        self.assertIn("定量化学分析", names)
 
     def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
         config = parse_platform_config(

@@ -16,12 +16,47 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 XIAOYA_DEFAULT_MYCOURSE_URL = "https://nankai.ai-augmented.com/app/jx-web/mycourse"
 COURSE_ID_PATTERNS = (
-    re.compile(r"/mycourse/(?P<course_id>[0-9A-Za-z_-]{6,})(?:/task)?(?:[/?#\s\"'>]|$)"),
-    re.compile(r"\bdata-(?:course-?)?id=(?P<course_id>[0-9A-Za-z_-]{6,})", re.IGNORECASE),
-    re.compile(r"course[_-]?id[\"'\s:=]+(?P<course_id>[0-9A-Za-z_-]{6,})", re.IGNORECASE),
-    re.compile(r"courseId[\"'\s:=]+(?P<course_id>[0-9A-Za-z_-]{6,})"),
+    re.compile(r"/mycourse/(?P<course_id>\d{12,})(?:[/?#\s\"'>]|$)"),
+    re.compile(r"\bdata-(?:course-?)?id=[\"']?(?P<course_id>\d{12,})", re.IGNORECASE),
+    re.compile(r"course[_-]?id[\"'\s:=]+[\"']?(?P<course_id>\d{12,})", re.IGNORECASE),
+    re.compile(r"courseId[\"'\s:=]+[\"']?(?P<course_id>\d{12,})"),
     re.compile(r"\b(?P<course_id>\d{12,})\b"),
 )
+COURSE_ID_KEYWORDS = (
+    "courseid",
+    "course_id",
+    "course-id",
+    "course_idstr",
+    "courseids",
+    "course",
+    "id",
+)
+COURSE_NAME_KEYS = (
+    "coursename",
+    "course_name",
+    "course-name",
+    "coursetitle",
+    "course_title",
+    "course-title",
+    "name",
+    "title",
+    "displayname",
+    "display_name",
+)
+COURSE_URL_KEYS = (
+    "url",
+    "href",
+    "link",
+    "path",
+    "route",
+    "resourceurl",
+    "resource_url",
+    "taskurl",
+    "task_url",
+)
+MAX_NETWORK_JSON_BYTES = 2_000_000
+MAX_NETWORK_PAYLOADS = 40
+MAX_CLICK_DISCOVERY_CANDIDATES = 40
 COURSE_ACTION_PHRASES = (
     "进入课程",
     "查看详情",
@@ -35,6 +70,7 @@ COURSE_NAME_NOISE = {
     "我的课程",
     "课程列表",
     "全部课程",
+    "所有的课",
     "课程",
     "暂无课程",
     "没有课程",
@@ -65,6 +101,12 @@ class XiaoyaCourseDiscoverer:
     ) -> list[KnownCourseConfig]:
         url = mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL
         self._emit(emit, f"[xiaoya-discover] start url={sanitize_url_for_log(url)}")
+        network_payloads: list[dict[str, str]] = []
+
+        def collect_response(response: Any) -> None:
+            collect_xiaoya_network_payload(response, mycourse_url=url, payloads=network_payloads)
+
+        page.on("response", collect_response)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except PlaywrightTimeoutError:
@@ -75,55 +117,73 @@ class XiaoyaCourseDiscoverer:
         self._emit(emit, f"[xiaoya-discover] page loaded url={sanitize_url_for_log(page.url)}")
         raw_candidates = wait_for_xiaoya_course_candidates(page, timeout_ms=15000)
         self._emit(emit, f"[xiaoya-discover] raw course candidates count={len(raw_candidates)}")
+        network_candidates = raw_course_candidates_from_network_payloads(network_payloads, mycourse_url=url)
+        if network_candidates:
+            self._emit(emit, f"[xiaoya-discover] network course candidates count={len(network_candidates)}")
 
         discovered: list[KnownCourseConfig] = []
         seen_course_ids: set[str] = set()
         skipped_no_id = 0
-        for raw in raw_candidates:
-            course_id = extract_course_id_from_raw(raw)
-            text_hint = raw_text_hint(raw)
-            if not course_id:
-                skipped_no_id += 1
-                if skipped_no_id <= 20:
+
+        def append_candidates(candidates: list[dict[str, Any]]) -> None:
+            nonlocal skipped_no_id
+            for raw in dedupe_raw_course_candidates(candidates):
+                course_id = extract_course_id_from_raw(raw)
+                text_hint = raw_text_hint(raw)
+                if not course_id:
+                    skipped_no_id += 1
+                    if skipped_no_id <= 20:
+                        self._emit(
+                            emit,
+                            f"[xiaoya-discover] skipped reason=no_course_id text={sanitize_log_value(text_hint)}",
+                        )
+                    continue
+
+                course = extract_course_name_from_raw(raw, course_id=course_id)
+                if not course:
                     self._emit(
                         emit,
-                        f"[xiaoya-discover] skipped reason=no_course_id text={sanitize_log_value(text_hint)}",
+                        f"[xiaoya-discover] skipped reason=no_course_name course_id={course_id} "
+                        f"text={sanitize_log_value(text_hint)}",
                     )
-                continue
+                    continue
+                if len(course) > 80:
+                    self._emit(
+                        emit,
+                        f"[xiaoya-discover] skipped reason=suspicious_course_name course_id={course_id} "
+                        f"text={sanitize_log_value(course)}",
+                    )
+                    continue
+                if course_id in seen_course_ids:
+                    self._emit(emit, f"[xiaoya-discover] duplicate course_id skipped course_id={course_id}")
+                    continue
 
-            course = extract_course_name_from_raw(raw, course_id=course_id)
-            if not course:
+                task_url = build_xiaoya_task_url(url, course_id, href=raw_href(raw))
+                candidate = KnownCourseConfig(
+                    course=course,
+                    course_id=course_id,
+                    task_url=task_url,
+                    source="discovered",
+                )
+                discovered.append(candidate)
+                seen_course_ids.add(course_id)
                 self._emit(
                     emit,
-                    f"[xiaoya-discover] skipped reason=no_course_name course_id={course_id} "
-                    f"text={sanitize_log_value(text_hint)}",
+                    f"[xiaoya-discover] candidate course={sanitize_log_value(course)} "
+                    f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
                 )
-                continue
-            if len(course) > 80:
-                self._emit(
-                    emit,
-                    f"[xiaoya-discover] skipped reason=suspicious_course_name course_id={course_id} "
-                    f"text={sanitize_log_value(course)}",
-                )
-                continue
-            if course_id in seen_course_ids:
-                self._emit(emit, f"[xiaoya-discover] duplicate course_id skipped course_id={course_id}")
-                continue
 
-            task_url = build_xiaoya_task_url(url, course_id, href=raw_href(raw))
-            candidate = KnownCourseConfig(
-                course=course,
-                course_id=course_id,
-                task_url=task_url,
-                source="discovered",
-            )
-            discovered.append(candidate)
-            seen_course_ids.add(course_id)
-            self._emit(
-                emit,
-                f"[xiaoya-discover] candidate course={sanitize_log_value(course)} "
-                f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
-            )
+        append_candidates(raw_candidates + network_candidates)
+
+        click_candidates = discover_course_candidates_by_clicking(
+            page,
+            mycourse_url=url,
+            known_course_ids=seen_course_ids,
+            emit=emit,
+        )
+        if click_candidates:
+            self._emit(emit, f"[xiaoya-discover] click course candidates count={len(click_candidates)}")
+            append_candidates(click_candidates)
 
         if not discovered:
             dump_xiaoya_discovery_debug(page, self.settings, scan_id=scan_id, reason="no-courses")
@@ -195,8 +255,311 @@ def wait_for_xiaoya_course_candidates(page: Page, *, timeout_ms: int) -> list[di
         last_candidates = evaluate_course_candidates(page)
         if any(extract_course_id_from_raw(candidate) for candidate in last_candidates):
             return last_candidates
+        if any(looks_like_course_card_text(raw_text_hint(candidate)) for candidate in last_candidates):
+            return last_candidates
         page.wait_for_timeout(500)
     return last_candidates
+
+
+def collect_xiaoya_network_payload(response: Any, *, mycourse_url: str, payloads: list[dict[str, str]]) -> None:
+    if len(payloads) >= MAX_NETWORK_PAYLOADS:
+        return
+    try:
+        response_url = str(getattr(response, "url", "") or "")
+        if not response_url:
+            return
+        if not same_origin_or_xiaoya(response_url, mycourse_url):
+            return
+        content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "").lower()
+        lower_url = response_url.lower()
+        if "json" not in content_type and not any(
+            marker in lower_url for marker in ("course", "mycourse", "jx-web", "teaching")
+        ):
+            return
+        body = response.text()
+        if not body or len(body) > MAX_NETWORK_JSON_BYTES:
+            return
+        if body.lstrip()[:1] not in ("{", "["):
+            return
+        payloads.append({"url": response_url, "body": body})
+    except Exception:
+        return
+
+
+def raw_course_candidates_from_network_payloads(
+    payloads: list[dict[str, str]], *, mycourse_url: str
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for payload in payloads:
+        try:
+            data = json.loads(payload.get("body") or "")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for mapping in iter_json_mappings(data):
+            course_id = extract_course_id_from_mapping(mapping)
+            if not course_id:
+                continue
+            course_name = extract_course_name_from_mapping(mapping, course_id=course_id)
+            if not course_name:
+                continue
+            href = extract_course_href_from_mapping(mapping, mycourse_url=mycourse_url, course_id=course_id)
+            candidates.append(
+                {
+                    "href": href,
+                    "absolute_href": urljoin(mycourse_url, href) if href else "",
+                    "text": course_name,
+                    "attrs": f"network_url={payload.get('url', '')} course_id={course_id}",
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [course_name],
+                }
+            )
+    return dedupe_raw_course_candidates(candidates)
+
+
+def iter_json_mappings(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 8:
+        return []
+    mappings: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        mappings.append(value)
+        for child in value.values():
+            mappings.extend(iter_json_mappings(child, depth=depth + 1))
+    elif isinstance(value, list):
+        for child in value[:1000]:
+            mappings.extend(iter_json_mappings(child, depth=depth + 1))
+    return mappings
+
+
+def extract_course_id_from_mapping(mapping: dict[str, Any]) -> str:
+    direct_values: list[str] = []
+    has_course_hint = mapping_has_course_hint(mapping)
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        value_text = stringify_json_scalar(value)
+        if not value_text:
+            continue
+        if key_norm == "id" and not has_course_hint:
+            continue
+        if key_norm in COURSE_ID_KEYWORDS or ("course" in key_norm and "id" in key_norm):
+            direct_values.append(value_text)
+    course_id = extract_course_id(*direct_values)
+    if course_id:
+        return course_id
+
+    url_values = []
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        value_text = stringify_json_scalar(value)
+        if key_norm in COURSE_URL_KEYS or "url" in key_norm or "href" in key_norm or "link" in key_norm:
+            url_values.append(value_text)
+    course_id = extract_course_id(*url_values)
+    if course_id:
+        return course_id
+
+    if has_course_hint:
+        return extract_course_id(json.dumps(mapping, ensure_ascii=False)[:4000])
+    return ""
+
+
+def extract_course_name_from_mapping(mapping: dict[str, Any], *, course_id: str) -> str:
+    candidates: list[str] = []
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        value_text = stringify_json_scalar(value)
+        if not value_text:
+            continue
+        if key_norm in COURSE_NAME_KEYS or (
+            "course" in key_norm and ("name" in key_norm or "title" in key_norm)
+        ):
+            candidates.extend(course_name_candidates(value_text, course_id=course_id))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda name: course_name_score(name, 0))
+
+
+def extract_course_href_from_mapping(mapping: dict[str, Any], *, mycourse_url: str, course_id: str) -> str:
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        value_text = stringify_json_scalar(value)
+        if not value_text:
+            continue
+        if key_norm in COURSE_URL_KEYS or "url" in key_norm or "href" in key_norm or "link" in key_norm:
+            if extract_course_id(value_text) == course_id:
+                return urljoin(mycourse_url, value_text)
+    return build_xiaoya_task_url(mycourse_url, course_id)
+
+
+def stringify_json_scalar(value: Any) -> str:
+    if isinstance(value, (dict, list, tuple, set)):
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_json_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "", str(key).strip().lower())
+
+
+def mapping_has_course_hint(mapping: dict[str, Any]) -> bool:
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        value_text = stringify_json_scalar(value)
+        if "course" in key_norm:
+            return True
+        if "/mycourse/" in value_text or "教务开课" in value_text or "校内公开" in value_text:
+            return True
+        if looks_like_course_card_text(value_text):
+            return True
+    return False
+
+
+def same_origin_or_xiaoya(response_url: str, mycourse_url: str) -> bool:
+    response_host = urlparse(response_url).netloc
+    mycourse_host = urlparse(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL).netloc
+    return not response_host or response_host == mycourse_host or response_host.endswith(".ai-augmented.com")
+
+
+def discover_course_candidates_by_clicking(
+    page: Page,
+    *,
+    mycourse_url: str,
+    known_course_ids: set[str],
+    emit: Callable[[str], None] | None,
+) -> list[dict[str, Any]]:
+    initial_candidates = mark_xiaoya_click_candidates(page)
+    if not initial_candidates or len(initial_candidates) <= len(known_course_ids):
+        return []
+
+    raw_candidates: list[dict[str, Any]] = []
+    click_count = min(len(initial_candidates), MAX_CLICK_DISCOVERY_CANDIDATES)
+    for index in range(click_count):
+        try:
+            if not is_mycourse_listing_url(page.url, mycourse_url):
+                page.goto(mycourse_url, wait_until="domcontentloaded", timeout=10000)
+            wait_for_xiaoya_course_candidates(page, timeout_ms=5000)
+            click_candidates = mark_xiaoya_click_candidates(page)
+            if index >= len(click_candidates):
+                continue
+            click_candidate = click_candidates[index]
+            marker = str(click_candidate.get("marker") or "")
+            if not marker:
+                continue
+            before_url = page.url
+            locator = page.locator(f'[data-hw-xiaoya-click-index="{marker}"]').first
+            locator.scroll_into_view_if_needed(timeout=1500)
+            locator.click(timeout=3000)
+            course_id = wait_for_course_id_in_url(page, before_url=before_url, timeout_ms=3500)
+            if not course_id or course_id in known_course_ids:
+                continue
+            raw_candidates.append(
+                {
+                    "href": page.url,
+                    "absolute_href": page.url,
+                    "text": str(click_candidate.get("text") or ""),
+                    "attrs": "click-discovered",
+                    "ancestor_texts": [str(click_candidate.get("text") or "")],
+                    "ancestor_attrs": [],
+                    "title_texts": click_candidate.get("title_texts") or [],
+                }
+            )
+            known_course_ids.add(course_id)
+            if emit is not None:
+                emit(f"[xiaoya-discover] click candidate course_id={course_id} url={sanitize_url_for_log(page.url)}")
+        except Exception as exc:  # noqa: BLE001 - one card must not block discovery.
+            if emit is not None:
+                emit(f"[xiaoya-discover] click skipped index={index + 1} type={type(exc).__name__}")
+        finally:
+            try:
+                if not is_mycourse_listing_url(page.url, mycourse_url):
+                    page.goto(mycourse_url, wait_until="domcontentloaded", timeout=10000)
+            except Exception:
+                pass
+    return dedupe_raw_course_candidates(raw_candidates)
+
+
+def is_mycourse_listing_url(current_url: str, mycourse_url: str) -> bool:
+    current = urlparse(current_url or "")
+    expected = urlparse(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL)
+    return current.netloc == expected.netloc and current.path.rstrip("/") == expected.path.rstrip("/")
+
+
+def mark_xiaoya_click_candidates(page: Page) -> list[dict[str, Any]]:
+    try:
+        raw = page.evaluate(
+            """
+            () => {
+              const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+              const visible = element => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width >= 80 && rect.height >= 32
+                  && style.visibility !== 'hidden'
+                  && style.display !== 'none'
+                  && Number(style.opacity || 1) > 0;
+              };
+              const looksCourseCard = text => {
+                if (!text || text.length < 4 || text.length > 360) return false;
+                if (!/[\\u4e00-\\u9fff]/.test(text)) return false;
+                if (/我的课程.*收藏的课.*访问的课/.test(text)) return false;
+                if (/加入课程.*创建课程.*正在进行/.test(text)) return false;
+                return /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text);
+              };
+              const titleTexts = element => Array.from(
+                element.querySelectorAll('h1,h2,h3,h4,[class*="title"],[class*="Title"],[class*="name"],[class*="Name"],[title]')
+              )
+                .slice(0, 8)
+                .map(node => compact(node.innerText || node.textContent || node.getAttribute('title') || ''))
+                .filter(Boolean);
+              document.querySelectorAll('[data-hw-xiaoya-click-index]')
+                .forEach(element => element.removeAttribute('data-hw-xiaoya-click-index'));
+              const elements = Array.from(document.body.querySelectorAll(
+                'a,button,[role="button"],[onclick],article,li,section,div,[class*="card"],[class*="Card"],[class*="course"],[class*="Course"]'
+              ));
+              const targets = [];
+              const seenTargets = new Set();
+              for (const element of elements) {
+                if (!visible(element)) continue;
+                const text = compact(element.innerText || element.textContent || '');
+                if (!looksCourseCard(text)) continue;
+                const hasCourseChild = Array.from(element.children || []).some(child => {
+                  if (!visible(child)) return false;
+                  const childText = compact(child.innerText || child.textContent || '');
+                  return looksCourseCard(childText) && childText.length >= Math.min(text.length * 0.7, 180);
+                });
+                if (hasCourseChild) continue;
+                const target = element.closest('a,button,[role="button"],[onclick]') || element;
+                if (!visible(target) || seenTargets.has(target)) continue;
+                seenTargets.add(target);
+                const marker = String(targets.length);
+                target.setAttribute('data-hw-xiaoya-click-index', marker);
+                targets.push({
+                  marker,
+                  text: text.slice(0, 800),
+                  title_texts: titleTexts(element),
+                });
+              }
+              return targets.slice(0, 80);
+            }
+            """
+        )
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def wait_for_course_id_in_url(page: Page, *, before_url: str, timeout_ms: int) -> str:
+    deadline = monotonic_time.monotonic() + max(timeout_ms, 500) / 1000
+    while monotonic_time.monotonic() < deadline:
+        current_url = str(getattr(page, "url", "") or "")
+        course_id = extract_course_id(current_url)
+        if course_id and current_url != before_url:
+            return course_id
+        page.wait_for_timeout(250)
+    return extract_course_id(str(getattr(page, "url", "") or ""))
 
 
 def evaluate_course_candidates(page: Page) -> list[dict[str, Any]]:
@@ -218,7 +581,7 @@ def evaluate_course_candidates(page: Page) -> list[dict[str, Any]]:
                 .map(node => compact(node.innerText || node.textContent || node.getAttribute('title') || ''))
                 .filter(Boolean);
               const hasCourseIdHint = value => (
-                /\\/mycourse\\/[0-9A-Za-z_-]{6,}|course[_-]?id|data-(?:course-?)?id=|\\b\\d{12,}\\b/i
+                /\\/mycourse\\/\\d{12,}|course[_-]?id|data-(?:course-?)?id=|\\b\\d{12,}\\b/i
               ).test(value || '');
               const isCourseish = value => /课程|course/i.test(value || '');
               const elements = new Set();
@@ -329,13 +692,40 @@ def course_name_candidates(text: str, *, course_id: str) -> list[str]:
         raw_lines = [text]
     candidates: list[str] = []
     for line in raw_lines:
-        name = normalize_course_name(line)
-        if valid_course_name(name, course_id=course_id):
-            candidates.append(name)
+        for fragment in course_name_fragments(line):
+            name = normalize_course_name(fragment)
+            if valid_course_name(name, course_id=course_id):
+                candidates.append(name)
     compact_block = normalize_course_name(text)
     if valid_course_name(compact_block, course_id=course_id):
         candidates.append(compact_block)
     return dedupe_names(candidates)
+
+
+def course_name_fragments(line: str) -> list[str]:
+    fragments = [line]
+    for marker in (
+        " 学院：",
+        " 学院:",
+        " 院系：",
+        " 院系:",
+        " 教师：",
+        " 教师:",
+        " 老师：",
+        " 老师:",
+        " 校内公开",
+        " 教务开课",
+        " 访问量",
+    ):
+        if marker in line:
+            fragments.append(line.split(marker, 1)[0])
+    stats_match = re.search(r"(?P<name>.+?)\s+\d+次\s+\d+人\b", line)
+    if stats_match:
+        fragments.append(stats_match.group("name"))
+    term_match = re.search(r"(?P<name>.+?)\s+202\d年(?:春|夏|秋|冬)?\b", line)
+    if term_match:
+        fragments.append(term_match.group("name"))
+    return fragments
 
 
 def normalize_course_name(value: str) -> str:
@@ -361,7 +751,22 @@ def valid_course_name(name: str, *, course_id: str) -> bool:
         return False
     if re.fullmatch(r"[\d\s./_-]+", name):
         return False
+    if looks_like_course_nav_text(name):
+        return False
     return True
+
+
+def looks_like_course_nav_text(text: str) -> bool:
+    return bool(re.search(r"我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行", text))
+
+
+def looks_like_course_card_text(text: str) -> bool:
+    compact = normalize_course_name(text)
+    if not compact or len(compact) > 1000:
+        return False
+    if looks_like_course_nav_text(compact):
+        return False
+    return bool(re.search(r"学院[:：]|校内公开|教务开课|\d+次\s+\d+人|202\d年", compact))
 
 
 def course_name_score(name: str, block_index: int) -> int:
@@ -408,6 +813,23 @@ def dedupe_names(names: list[str]) -> list[str]:
             continue
         seen.add(name)
         unique.append(name)
+    return unique
+
+
+def dedupe_raw_course_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for candidate in candidates:
+        course_id = extract_course_id_from_raw(candidate)
+        key = (
+            course_id,
+            sanitize_url_for_log(raw_href(candidate)),
+            sanitize_log_value(raw_text_hint(candidate), limit=120),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
     return unique
 
 
