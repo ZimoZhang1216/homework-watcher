@@ -78,7 +78,7 @@ if [ -f "$ENV_FILE" ]; then
   set -u
 fi
 
-: "${APP_VERSION:=V2.0}"
+: "${APP_VERSION:=V2.1}"
 : "${DATABASE_URL:=sqlite:///$APP_DIR/data/homework_watcher.sqlite3}"
 : "${PLAYWRIGHT_USER_DATA_DIR:=$APP_DIR/data/playwright-user-data}"
 : "${CONFIG_PATH:=$APP_DIR/config/platforms.yaml}"

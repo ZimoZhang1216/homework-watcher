@@ -14,6 +14,7 @@ class KnownCourseConfig:
     course: str
     course_id: str
     task_url: str
+    source: str = "known"
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class PlatformConfig:
     enabled: bool
     base_url: str
     known_courses: list[KnownCourseConfig]
+    auto_discover_courses: bool = False
+    mycourse_url: str = ""
 
 
 def load_platform_configs(path: Path) -> dict[str, PlatformConfig]:
@@ -46,11 +49,22 @@ def parse_platform_config(name: str, raw: dict[str, Any]) -> PlatformConfig:
         course = str(item.get("course") or "").strip()
         course_id = str(item.get("course_id") or "").strip()
         task_url = str(item.get("task_url") or "").strip()
+        source = str(item.get("source") or "known").strip() or "known"
         if course and task_url:
-            courses.append(KnownCourseConfig(course=course, course_id=course_id, task_url=task_url))
+            courses.append(
+                KnownCourseConfig(course=course, course_id=course_id, task_url=task_url, source=source)
+            )
+    base_url = str(raw.get("base_url") or "").strip()
+    default_mycourse_url = ""
+    if name == "xiaoya":
+        default_mycourse_url = f"{base_url.rstrip('/')}/app/jx-web/mycourse" if base_url else (
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse"
+        )
     return PlatformConfig(
         name=name,
         enabled=bool(raw.get("enabled", False)),
-        base_url=str(raw.get("base_url") or "").strip(),
+        base_url=base_url,
         known_courses=courses,
+        auto_discover_courses=bool(raw.get("auto_discover_courses", name == "xiaoya")),
+        mycourse_url=str(raw.get("mycourse_url") or default_mycourse_url).strip(),
     )

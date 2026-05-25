@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import inspect
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
 
@@ -37,6 +37,7 @@ class ScanResult:
     errors: list[str]
     todos: list[dict[str, object]]
     owner_key: str = "default"
+    platform_summaries: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -54,6 +55,7 @@ class ScanResult:
             "errors": self.errors,
             "todos": self.todos,
             "owner_key": self.owner_key,
+            "platform_summaries": self.platform_summaries,
         }
 
 
@@ -98,6 +100,7 @@ class ScanService:
         platform_keys = self._platform_keys(platforms)
         all_candidates: list[AssignmentCandidate] = []
         errors: list[str] = []
+        platform_summaries: dict[str, dict[str, object]] = {}
 
         for platform_key in platform_keys:
             scanner = self.scanners.get(platform_key)
@@ -122,6 +125,9 @@ class ScanService:
                     progress=emit_progress,
                 )
                 candidates = scanner.scan(context)
+                platform_summaries.update(
+                    {key: dict(value) for key, value in context.metadata.items()}
+                )
                 self._log(
                     scan_id,
                     "platform end %s count=%s titles=%s",
@@ -148,6 +154,11 @@ class ScanService:
             stats = upsert_assignments(session, filtered, owner_key=self.user_key)
             todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=self.user_key)]
 
+        for summary in platform_summaries.values():
+            platform_label = summary.get("platform_label")
+            if platform_label:
+                summary["todo_count"] = sum(1 for item in todos if item.get("platform") == platform_label)
+
         self._log(
             scan_id,
             "after db upsert inserted=%s updated=%s skipped=%s",
@@ -168,6 +179,7 @@ class ScanService:
             errors=errors,
             todos=todos,
             owner_key=self.user_key,
+            platform_summaries=platform_summaries,
         )
         LAST_SCAN_RESULTS.append(result)
         del LAST_SCAN_RESULTS[:-5]

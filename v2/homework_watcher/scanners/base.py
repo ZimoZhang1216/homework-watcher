@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from homework_watcher.candidates import AssignmentCandidate
@@ -17,6 +17,7 @@ class ScannerContext:
     platform_config: PlatformConfig | None
     user_key: str = "default"
     progress: ProgressCallback | None = None
+    metadata: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def emit(self, percent: int, message: str) -> None:
         if self.progress:

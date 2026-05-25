@@ -55,6 +55,7 @@ def create_app() -> FastAPI:
         with session_factory() as session:
             todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=user.username)]
         login_status = login_manager.status(user.username)
+        latest_result = latest_scan_result(user.username)
         return HTMLResponse(
             render_page(
                 "当前待办",
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
                     <a class="button-link" href="/assignments">查看所有记录</a>
                   </div>
                 </section>
+                {render_scan_summary(latest_result)}
                 {render_platform_login_panel(login_status)}
                 """,
                 settings=settings,
@@ -449,6 +451,36 @@ def render_message_panel(title: str, message: str, *, back_href: str) -> str:
     """
 
 
+def render_scan_summary(result) -> str:
+    if result is None:
+        return ""
+    summary = result.platform_summaries.get("xiaoya", {})
+    if not summary:
+        return ""
+    fields = [
+        ("已配置课程", "known_courses_count"),
+        ("自动发现课程", "discovered_courses_count"),
+        ("合并后课程", "merged_courses_count"),
+        ("已扫描课程", "scanned_courses_count"),
+        ("失败课程", "failed_courses_count"),
+        ("解析作业", "parsed_assignments_count"),
+        ("当前待办", "todo_count"),
+    ]
+    cells = "".join(
+        f'<div><span class="label">{escape(label)}</span><strong>{escape(str(summary.get(key, 0)))}</strong></div>'
+        for label, key in fields
+    )
+    return f"""
+    <section class="panel summary-panel">
+      <div class="panel-title">
+        <h2>小雅最近扫描摘要</h2>
+        <span class="count">{escape(str(summary.get("merged_courses_count", 0)))}</span>
+      </div>
+      <div class="summary-grid">{cells}</div>
+    </section>
+    """
+
+
 def render_assignment_table(assignments: list[dict[str, object]]) -> str:
     if not assignments:
         return '<p class="muted">当前没有待办。扫描服务接入后会在这里显示作业。</p>'
@@ -517,8 +549,11 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
 	    .auth-form {{ display: grid; gap: 14px; }}
 	    label {{ display: grid; gap: 6px; color: #66736d; font-weight: 700; }}
 	    input {{ min-height: 40px; border: 1px solid #cfd8d0; border-radius: 6px; padding: 0 10px; font: inherit; }}
-	    .error {{ color: #9b1c1c; font-weight: 700; }}
-	    .login-panel {{ margin-top: 18px; }}
+    .error {{ color: #9b1c1c; font-weight: 700; }}
+	    .login-panel, .summary-panel {{ margin-top: 18px; }}
+    .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; margin-top: 12px; }}
+    .summary-grid div {{ border-top: 1px solid #e2e6df; padding-top: 10px; }}
+    .summary-grid strong {{ display: block; margin-top: 4px; font-size: 22px; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
     .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
     .label {{ display: inline-block; min-width: 72px; color: #66736d; font-weight: 700; }}
