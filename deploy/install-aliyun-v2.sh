@@ -78,7 +78,6 @@ if [ -f "$ENV_FILE" ]; then
   set -u
 fi
 
-: "${APP_VERSION:=V2.1}"
 : "${DATABASE_URL:=sqlite:///$APP_DIR/data/homework_watcher.sqlite3}"
 : "${PLAYWRIGHT_USER_DATA_DIR:=$APP_DIR/data/playwright-user-data}"
 : "${CONFIG_PATH:=$APP_DIR/config/platforms.yaml}"
@@ -105,6 +104,10 @@ else
   git clone --depth 1 "$REPO_URL" "$SRC_DIR"
 fi
 GIT_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
+APP_VERSION="$(
+  sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$SRC_DIR/v2/homework_watcher/__init__.py" | head -n 1
+)"
+: "${APP_VERSION:=V2.1}"
 
 log "stopping old web service if present"
 systemctl stop homework-watcher-web >/dev/null 2>&1 || true
