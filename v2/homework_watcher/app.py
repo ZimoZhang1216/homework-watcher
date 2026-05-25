@@ -620,51 +620,197 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{escape(title)} - homework-watcher v2</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f2; color: #1f2924; }}
-    main {{ max-width: 1120px; margin: 0 auto; padding: 48px 24px; }}
-	    header {{ display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 28px; }}
-	    h1 {{ font-size: 34px; margin: 0; letter-spacing: 0; }}
-	    h2 {{ margin-top: 0; }}
-    .badge {{ border: 1px solid #9ab5a8; color: #1f6b4b; border-radius: 6px; padding: 2px 8px; font-weight: 700; }}
-    .panel {{ background: #fff; border: 1px solid #d8ded6; border-radius: 8px; padding: 24px; }}
+    :root {{
+      color-scheme: light;
+      --primary: #7e0c6e;
+      --primary-strong: #5f0754;
+      --primary-soft: #f3e4f1;
+      --primary-ring: rgba(126, 12, 110, 0.24);
+      --accent: #b79042;
+      --bg: #f8f5fa;
+      --surface: #ffffff;
+      --surface-subtle: #fbf9fc;
+      --text: #211b25;
+      --muted: #6d6172;
+      --border: #e4d9e8;
+      --border-strong: #d4c2da;
+      --danger: #b42318;
+      --shadow: 0 16px 42px rgba(49, 31, 58, 0.09);
+      --shadow-soft: 0 8px 22px rgba(49, 31, 58, 0.07);
+      --on-primary: #ffffff;
+    }}
+    html {{ min-height: 100%; background: var(--bg); }}
+    body {{
+      min-height: 100%;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }}
+    main {{ max-width: 1160px; margin: 0 auto; padding: 48px 24px; }}
+    header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: center;
+      margin-bottom: 28px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+    }}
+    h1 {{ font-size: 34px; margin: 0; letter-spacing: 0; color: var(--text); }}
+    h2 {{ margin: 0; font-size: 24px; color: var(--text); }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border-strong);
+      background: var(--primary-soft);
+      color: var(--primary);
+      border-radius: 8px;
+      padding: 2px 10px;
+      font-weight: 800;
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface) 60%, transparent);
+    }}
+    .panel {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      overflow-x: auto;
+    }}
+    .panel + .panel {{ margin-top: 18px; }}
     .panel-title {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
-    .count {{ display: inline-flex; min-width: 28px; height: 28px; align-items: center; justify-content: center; background: #e7f2ec; color: #1f6b4b; border-radius: 999px; font-weight: 700; }}
-    .muted {{ color: #66736d; }}
-    table {{ width: 100%; border-collapse: collapse; }}
-    th, td {{ text-align: left; padding: 12px 10px; border-top: 1px solid #e2e6df; vertical-align: top; }}
-    th {{ color: #66736d; font-size: 14px; }}
-    a {{ color: #145f45; }}
-	    button, .button-link {{ display: inline-flex; align-items: center; min-height: 42px; border: 1px solid #1f6b4b; background: #1f6b4b; color: #fff; border-radius: 6px; padding: 0 16px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }}
-	    button.secondary {{ background: #fff; color: #1f6b4b; }}
-	    button.compact {{ min-height: 32px; padding: 0 10px; }}
-	    .button-link {{ background: #fff; color: #1f6b4b; }}
-	    .primary-link {{ background: #1f6b4b; color: #fff; }}
-	    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
-	    .account {{ display: flex; align-items: center; gap: 12px; color: #66736d; }}
-	    .auth-panel {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }}
-	    .auth-form {{ display: grid; gap: 14px; }}
-	    label {{ display: grid; gap: 6px; color: #66736d; font-weight: 700; }}
-	    input {{ min-height: 40px; border: 1px solid #cfd8d0; border-radius: 6px; padding: 0 10px; font: inherit; }}
-    .error {{ color: #9b1c1c; font-weight: 700; }}
-	    .login-panel, .summary-panel {{ margin-top: 18px; }}
-    .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; margin-top: 12px; }}
-    .summary-grid div {{ border-top: 1px solid #e2e6df; padding-top: 10px; }}
-    .summary-grid strong {{ display: block; margin-top: 4px; font-size: 22px; }}
-    .scan-progress {{ margin-top: 20px; border-top: 1px solid #e2e6df; padding-top: 16px; }}
-    .progress-header {{ display: flex; justify-content: space-between; align-items: baseline; gap: 16px; font-weight: 700; }}
-    .progress-track {{ height: 12px; margin-top: 10px; overflow: hidden; background: #edf0ea; border: 1px solid #d8ded6; border-radius: 999px; }}
-    .progress-fill {{ width: 0%; height: 100%; background: #1f6b4b; transition: width 180ms ease; }}
+    .count {{
+      display: inline-flex;
+      min-width: 30px;
+      height: 30px;
+      align-items: center;
+      justify-content: center;
+      background: var(--primary-soft);
+      color: var(--primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      font-weight: 800;
+    }}
+    .muted {{ color: var(--muted); }}
+    table {{ width: 100%; min-width: 760px; border-collapse: collapse; margin-top: 8px; }}
+    th, td {{ text-align: left; padding: 13px 10px; border-top: 1px solid var(--border); vertical-align: top; }}
+    th {{ color: var(--muted); font-size: 13px; font-weight: 800; }}
+    tbody tr:hover {{ background: var(--surface-subtle); }}
+    a {{ color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 3px; }}
+    a:hover {{ color: var(--primary-strong); }}
+    button, .button-link {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      border: 1px solid var(--primary);
+      background: var(--primary);
+      color: var(--on-primary);
+      border-radius: 8px;
+      padding: 0 16px;
+      font: inherit;
+      font-weight: 800;
+      text-decoration: none;
+      cursor: pointer;
+      box-shadow: var(--shadow-soft);
+      transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+    }}
+    button:hover, .button-link:hover {{ border-color: var(--primary-strong); background: var(--primary-strong); color: var(--on-primary); transform: translateY(-1px); }}
+    button.secondary, .button-link {{
+      background: var(--surface);
+      color: var(--primary);
+      box-shadow: none;
+    }}
+    button.secondary:hover, .button-link:hover {{ background: var(--primary-soft); color: var(--primary-strong); }}
+    button.compact {{ min-height: 32px; padding: 0 10px; border-radius: 7px; }}
+    .primary-link {{ background: var(--primary); color: var(--on-primary); box-shadow: var(--shadow-soft); }}
+    .primary-link:hover {{ border-color: var(--primary-strong); background: var(--primary-strong); color: var(--on-primary); }}
+    .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
+    .account {{ display: flex; align-items: center; gap: 12px; color: var(--muted); }}
+    .auth-panel {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }}
+    .auth-form {{ display: grid; gap: 14px; }}
+    label {{ display: grid; gap: 6px; color: var(--muted); font-weight: 800; }}
+    input {{
+      min-height: 42px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface-subtle);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0 11px;
+      font: inherit;
+      accent-color: var(--primary);
+    }}
+    input:focus, button:focus-visible, .button-link:focus-visible {{
+      outline: 3px solid var(--primary-ring);
+      outline-offset: 2px;
+    }}
+    .error {{ color: var(--danger); font-weight: 800; }}
+    .login-panel, .summary-panel {{ margin-top: 18px; }}
+    .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 14px; margin-top: 14px; }}
+    .summary-grid div {{ border: 1px solid var(--border); background: var(--surface-subtle); border-radius: 8px; padding: 12px; }}
+    .summary-grid strong {{ display: block; margin-top: 4px; font-size: 24px; color: var(--primary); }}
+    .scan-progress {{ margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px; }}
+    .progress-header {{ display: flex; justify-content: space-between; align-items: baseline; gap: 16px; font-weight: 800; }}
+    .progress-track {{
+      height: 12px;
+      margin-top: 10px;
+      overflow: hidden;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+    }}
+    .progress-fill {{ width: 0%; height: 100%; background: var(--primary); transition: width 180ms ease; }}
     .progress-message {{ min-height: 22px; margin: 10px 0 0; }}
     .progress-actions {{ display: flex; justify-content: flex-end; margin-top: 10px; }}
-    button[disabled] {{ opacity: 0.72; cursor: wait; }}
+    button[disabled] {{ opacity: 0.64; cursor: wait; transform: none; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
-    .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
-    .label {{ display: inline-block; min-width: 72px; color: #66736d; font-weight: 700; }}
-    pre {{ white-space: pre-wrap; word-break: break-word; background: #f2f4ef; border-radius: 6px; padding: 16px; max-height: 560px; overflow: auto; }}
-    footer {{ margin-top: 32px; color: #66736d; font-size: 14px; }}
-	    @media (max-width: 720px) {{ .remote-panel, .auth-panel {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; flex-direction: column; }} }}
+    .remote-actions p {{ margin: 0 0 10px; color: var(--text); }}
+    .label {{ display: inline-block; min-width: 72px; color: var(--muted); font-weight: 800; }}
+    pre {{
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      max-height: 560px;
+      overflow: auto;
+    }}
+    footer {{ margin-top: 32px; color: var(--muted); font-size: 14px; }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        color-scheme: dark;
+        --primary: #d86fc8;
+        --primary-strong: #f0a8e3;
+        --primary-soft: #351a33;
+        --primary-ring: rgba(216, 111, 200, 0.34);
+        --accent: #d7bb75;
+        --bg: #141018;
+        --surface: #201725;
+        --surface-subtle: #2a2030;
+        --text: #f7eff8;
+        --muted: #c6b8c9;
+        --border: #3c2f42;
+        --border-strong: #5a4660;
+        --danger: #ff9b8e;
+        --shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+        --shadow-soft: 0 10px 24px rgba(0, 0, 0, 0.28);
+        --on-primary: #170d15;
+      }}
+    }}
+    @media (max-width: 720px) {{
+      main {{ padding: 28px 16px; }}
+      .remote-panel, .auth-panel {{ grid-template-columns: 1fr; }}
+      header {{ align-items: flex-start; flex-direction: column; }}
+      h1 {{ font-size: 30px; }}
+      .panel {{ padding: 18px; }}
+      .account {{ flex-wrap: wrap; }}
+    }}
 	  </style>
 </head>
 <body>
