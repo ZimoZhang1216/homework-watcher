@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from html import escape
 
@@ -23,6 +24,7 @@ from .database import assignment_to_dict, create_session_factory, init_db, list_
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
 from .remote_login import RemoteLoginManager, build_novnc_url
+from .scan_progress import ScanProgressStore
 from .scan_service import ScanService, latest_scan_result
 from .settings import load_settings
 
@@ -35,6 +37,7 @@ def create_app() -> FastAPI:
     init_db(settings)
     session_factory = create_session_factory(settings)
     login_manager = RemoteLoginManager()
+    scan_progress = ScanProgressStore()
     app = FastAPI(title="homework-watcher-v2")
 
     @app.get("/health")
@@ -67,12 +70,13 @@ def create_app() -> FastAPI:
                   </div>
                   {render_assignment_table(todos)}
                   <div class="actions">
-                    <form method="post" action="/scan?redirect=1">
-                      <button type="submit">立即扫描</button>
+                    <form method="post" action="/scan?redirect=1" id="scan-form">
+                      <button type="submit" id="scan-button">立即扫描</button>
                     </form>
                     <a class="button-link" href="/logs/latest">查看最近扫描日志</a>
                     <a class="button-link" href="/assignments">查看所有记录</a>
                   </div>
+                  {render_scan_progress_panel()}
                 </section>
                 {render_scan_summary(latest_result)}
                 {render_platform_login_panel(login_status)}
@@ -140,6 +144,41 @@ def create_app() -> FastAPI:
         if redirect:
             return RedirectResponse("/", status_code=303)
         return result.to_dict()
+
+    @app.post("/api/scan/start")
+    def api_scan_start(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
+        snapshot, started = scan_progress.start(user.username)
+        if not started:
+            return snapshot.to_dict()
+
+        def run_scan_job(owner_key: str, scan_id: str) -> None:
+            try:
+                def emit_progress(percent: int, message: str) -> None:
+                    scan_progress.update(owner_key, scan_id, percent, message)
+
+                result = ScanService(settings, user_key=owner_key).run_scan(progress=emit_progress)
+                scan_progress.finish_success(owner_key, scan_id, result.to_dict())
+            except Exception as exc:  # noqa: BLE001 - keep the web progress endpoint alive.
+                scan_progress.finish_failed(owner_key, scan_id, f"{type(exc).__name__}: {exc}")
+
+        thread = threading.Thread(
+            target=run_scan_job,
+            args=(user.username, snapshot.scan_id),
+            name=f"scan-{user.username}",
+            daemon=True,
+        )
+        thread.start()
+        return scan_progress.get(user.username).to_dict()
+
+    @app.get("/api/scan/progress")
+    def api_scan_progress(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
+        return scan_progress.get(user.username).to_dict()
 
     @app.get("/api/todos")
     def api_todos(request: Request):
@@ -451,6 +490,21 @@ def render_message_panel(title: str, message: str, *, back_href: str) -> str:
     """
 
 
+def render_scan_progress_panel() -> str:
+    return """
+    <div class="scan-progress" id="scan-progress" data-start-url="/api/scan/start" data-progress-url="/api/scan/progress">
+      <div class="progress-header">
+        <span id="scan-progress-status">等待扫描</span>
+        <strong id="scan-progress-percent">0%</strong>
+      </div>
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="progress-fill" id="scan-progress-fill"></div>
+      </div>
+      <p class="muted progress-message" id="scan-progress-message">尚未开始扫描。</p>
+    </div>
+    """
+
+
 def render_scan_summary(result) -> str:
     if result is None:
         return ""
@@ -554,6 +608,12 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; margin-top: 12px; }}
     .summary-grid div {{ border-top: 1px solid #e2e6df; padding-top: 10px; }}
     .summary-grid strong {{ display: block; margin-top: 4px; font-size: 22px; }}
+    .scan-progress {{ margin-top: 20px; border-top: 1px solid #e2e6df; padding-top: 16px; }}
+    .progress-header {{ display: flex; justify-content: space-between; align-items: baseline; gap: 16px; font-weight: 700; }}
+    .progress-track {{ height: 12px; margin-top: 10px; overflow: hidden; background: #edf0ea; border: 1px solid #d8ded6; border-radius: 999px; }}
+    .progress-fill {{ width: 0%; height: 100%; background: #1f6b4b; transition: width 180ms ease; }}
+    .progress-message {{ min-height: 22px; margin: 10px 0 0; }}
+    button[disabled] {{ opacity: 0.72; cursor: wait; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
     .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
     .label {{ display: inline-block; min-width: 72px; color: #66736d; font-weight: 700; }}
@@ -574,8 +634,111 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     {body}
     <footer>commit {escape(git_commit())} · database {escape(str(settings.database_path))}</footer>
   </main>
+  {render_page_script()}
 </body>
 </html>"""
+
+
+def render_page_script() -> str:
+    return """
+  <script>
+    (() => {
+      const form = document.getElementById("scan-form");
+      const panel = document.getElementById("scan-progress");
+      if (!form || !panel) return;
+
+      const button = document.getElementById("scan-button");
+      const fill = document.getElementById("scan-progress-fill");
+      const percentText = document.getElementById("scan-progress-percent");
+      const statusText = document.getElementById("scan-progress-status");
+      const messageText = document.getElementById("scan-progress-message");
+      const track = panel.querySelector(".progress-track");
+      let pollTimer = null;
+      let reloadTimer = null;
+
+      const setProgress = (snapshot) => {
+        const percent = Math.max(0, Math.min(100, Number(snapshot.percent || 0)));
+        fill.style.width = `${percent}%`;
+        percentText.textContent = `${percent}%`;
+        track.setAttribute("aria-valuenow", String(percent));
+        messageText.textContent = snapshot.error || snapshot.message || "";
+        const labels = {
+          idle: "等待扫描",
+          running: "正在扫描",
+          succeeded: "扫描完成",
+          failed: "扫描失败"
+        };
+        statusText.textContent = labels[snapshot.status] || "扫描状态";
+        if (button) {
+          button.disabled = snapshot.status === "running";
+          button.textContent = snapshot.status === "running" ? "扫描中" : "立即扫描";
+        }
+      };
+
+      const stopPolling = () => {
+        if (pollTimer) window.clearInterval(pollTimer);
+        pollTimer = null;
+      };
+
+      const pollProgress = async () => {
+        try {
+          const response = await fetch(panel.dataset.progressUrl, { credentials: "same-origin" });
+          if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const snapshot = await response.json();
+          setProgress(snapshot);
+          if (snapshot.status === "running") {
+            if (!pollTimer) pollTimer = window.setInterval(pollProgress, 1000);
+            return;
+          }
+          stopPolling();
+          if (snapshot.status === "succeeded" && !reloadTimer) {
+            messageText.textContent = "扫描完成，正在刷新待办。";
+            reloadTimer = window.setTimeout(() => window.location.reload(), 900);
+          }
+        } catch (error) {
+          stopPolling();
+          statusText.textContent = "扫描状态不可用";
+          messageText.textContent = "无法读取扫描进度。";
+          if (button) button.disabled = false;
+        }
+      };
+
+      const startPolling = () => {
+        stopPolling();
+        pollProgress();
+        pollTimer = window.setInterval(pollProgress, 1000);
+      };
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (button) button.disabled = true;
+        try {
+          const response = await fetch(panel.dataset.startUrl, {
+            method: "POST",
+            credentials: "same-origin"
+          });
+          if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          setProgress(await response.json());
+          startPolling();
+        } catch (error) {
+          statusText.textContent = "启动失败";
+          messageText.textContent = "无法启动扫描。";
+          if (button) button.disabled = false;
+        }
+      });
+
+      pollProgress();
+    })();
+  </script>
+    """
 
 
 app = create_app()
