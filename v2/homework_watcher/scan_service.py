@@ -19,6 +19,7 @@ from .database import (
 )
 from .git_utils import git_commit
 from .logging_utils import get_scan_logger
+from .scan_progress import ScanCancelled
 from .scanners import FakeScanner, PlatformScanner, ScannerContext
 from .scanners.changjiang_yuketang import ChangjiangYuketangScanner
 from .scanners.xiaoya import XiaoyaScanner
@@ -136,6 +137,9 @@ class ScanService:
                     _safe_titles(candidates),
                 )
                 all_candidates.extend(candidates)
+            except ScanCancelled:
+                self._log(scan_id, "scan cancelled during platform %s", platform_key)
+                raise
             except Exception as exc:  # noqa: BLE001 - platform isolation is intentional.
                 message = f"{platform_key}: {type(exc).__name__}: {exc}"
                 errors.append(message)

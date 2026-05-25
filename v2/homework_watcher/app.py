@@ -24,7 +24,7 @@ from .database import assignment_to_dict, create_session_factory, init_db, list_
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
 from .remote_login import RemoteLoginManager, build_novnc_url
-from .scan_progress import ScanProgressStore
+from .scan_progress import ScanCancelled, ScanProgressStore
 from .scan_service import ScanService, latest_scan_result
 from .settings import load_settings
 
@@ -157,10 +157,14 @@ def create_app() -> FastAPI:
         def run_scan_job(owner_key: str, scan_id: str) -> None:
             try:
                 def emit_progress(percent: int, message: str) -> None:
+                    scan_progress.raise_if_cancelled(owner_key, scan_id)
                     scan_progress.update(owner_key, scan_id, percent, message)
 
                 result = ScanService(settings, user_key=owner_key).run_scan(progress=emit_progress)
+                scan_progress.raise_if_cancelled(owner_key, scan_id)
                 scan_progress.finish_success(owner_key, scan_id, result.to_dict())
+            except ScanCancelled:
+                scan_progress.finish_cancelled(owner_key, scan_id)
             except Exception as exc:  # noqa: BLE001 - keep the web progress endpoint alive.
                 scan_progress.finish_failed(owner_key, scan_id, f"{type(exc).__name__}: {exc}")
 
@@ -172,6 +176,14 @@ def create_app() -> FastAPI:
         )
         thread.start()
         return scan_progress.get(user.username).to_dict()
+
+    @app.post("/api/scan/cancel")
+    def api_scan_cancel(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
+        snapshot, _cancelled = scan_progress.cancel(user.username)
+        return snapshot.to_dict()
 
     @app.get("/api/scan/progress")
     def api_scan_progress(request: Request):
@@ -259,6 +271,7 @@ def create_app() -> FastAPI:
                 <section class="panel">
                   <h2>最近扫描日志</h2>
                   <pre>{content}</pre>
+                  {render_scan_progress_panel()}
                   <div class="actions"><a class="button-link" href="/">返回待办</a></div>
                 </section>
                 """,
@@ -492,7 +505,7 @@ def render_message_panel(title: str, message: str, *, back_href: str) -> str:
 
 def render_scan_progress_panel() -> str:
     return """
-    <div class="scan-progress" id="scan-progress" data-start-url="/api/scan/start" data-progress-url="/api/scan/progress">
+    <div class="scan-progress" id="scan-progress" data-start-url="/api/scan/start" data-progress-url="/api/scan/progress" data-cancel-url="/api/scan/cancel">
       <div class="progress-header">
         <span id="scan-progress-status">等待扫描</span>
         <strong id="scan-progress-percent">0%</strong>
@@ -501,6 +514,9 @@ def render_scan_progress_panel() -> str:
         <div class="progress-fill" id="scan-progress-fill"></div>
       </div>
       <p class="muted progress-message" id="scan-progress-message">尚未开始扫描。</p>
+      <div class="progress-actions">
+        <button type="button" class="secondary" id="scan-cancel-button" disabled>强制结束</button>
+      </div>
     </div>
     """
 
@@ -551,15 +567,43 @@ def render_assignment_table(assignments: list[dict[str, object]]) -> str:
             f"<td>{link}</td>"
             f"<td>{escape(str(item.get('status_raw') or ''))}</td>"
             f"<td>{escape(str(item.get('due_at') or ''))}</td>"
-            f"<td>{escape(str(item.get('last_seen_at') or ''))}</td>"
+            f"<td>{escape(format_due_distance(item.get('due_at')))}</td>"
             "</tr>"
         )
     return (
         "<table>"
-        "<thead><tr><th>平台</th><th>课程</th><th>标题</th><th>状态</th><th>截止时间</th><th>最后发现</th></tr></thead>"
+        "<thead><tr><th>平台</th><th>课程</th><th>标题</th><th>状态</th><th>截止时间</th><th>距今时间</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
+
+
+def format_due_distance(value: object, *, now: datetime | None = None) -> str:
+    if not value:
+        return ""
+    try:
+        due_at = datetime.fromisoformat(str(value))
+    except ValueError:
+        return ""
+    current = now or datetime.now()
+    if due_at.tzinfo is not None and current.tzinfo is None:
+        current = current.astimezone(due_at.tzinfo)
+    seconds = int((due_at - current).total_seconds())
+    if abs(seconds) < 60:
+        return "现在"
+    label = "还有" if seconds >= 0 else "已过"
+    seconds = abs(seconds)
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}天")
+    if hours and len(parts) < 2:
+        parts.append(f"{hours}小时")
+    if minutes and len(parts) < 2:
+        parts.append(f"{minutes}分钟")
+    return label + "".join(parts or ["1分钟"])
 
 
 def render_page(title: str, body: str, *, settings, user: CurrentUser | None = None) -> str:
@@ -613,6 +657,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     .progress-track {{ height: 12px; margin-top: 10px; overflow: hidden; background: #edf0ea; border: 1px solid #d8ded6; border-radius: 999px; }}
     .progress-fill {{ width: 0%; height: 100%; background: #1f6b4b; transition: width 180ms ease; }}
     .progress-message {{ min-height: 22px; margin: 10px 0 0; }}
+    .progress-actions {{ display: flex; justify-content: flex-end; margin-top: 10px; }}
     button[disabled] {{ opacity: 0.72; cursor: wait; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}
     .remote-actions p {{ margin: 0 0 10px; color: #1f2924; }}
@@ -645,9 +690,10 @@ def render_page_script() -> str:
     (() => {
       const form = document.getElementById("scan-form");
       const panel = document.getElementById("scan-progress");
-      if (!form || !panel) return;
+      if (!panel) return;
 
       const button = document.getElementById("scan-button");
+      const cancelButton = document.getElementById("scan-cancel-button");
       const fill = document.getElementById("scan-progress-fill");
       const percentText = document.getElementById("scan-progress-percent");
       const statusText = document.getElementById("scan-progress-status");
@@ -667,12 +713,17 @@ def render_page_script() -> str:
           idle: "等待扫描",
           running: "正在扫描",
           succeeded: "扫描完成",
-          failed: "扫描失败"
+          failed: "扫描失败",
+          cancelled: "已强制结束"
         };
         statusText.textContent = labels[snapshot.status] || "扫描状态";
         if (button) {
           button.disabled = snapshot.status === "running";
           button.textContent = snapshot.status === "running" ? "扫描中" : "立即扫描";
+        }
+        if (cancelButton) {
+          cancelButton.disabled = snapshot.status !== "running";
+          cancelButton.textContent = "强制结束";
         }
       };
 
@@ -703,6 +754,12 @@ def render_page_script() -> str:
             reloadTimer = window.setTimeout(() => window.location.reload(), 900);
           }
         } catch (error) {
+          if (sawRunningScan) {
+            statusText.textContent = "正在扫描";
+            messageText.textContent = "进度暂时不可用，继续尝试。";
+            if (!pollTimer) pollTimer = window.setInterval(pollProgress, 1000);
+            return;
+          }
           stopPolling();
           statusText.textContent = "扫描状态不可用";
           messageText.textContent = "无法读取扫描进度。";
@@ -716,29 +773,56 @@ def render_page_script() -> str:
         pollTimer = window.setInterval(pollProgress, 1000);
       };
 
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        if (button) button.disabled = true;
-        sawRunningScan = true;
-        try {
-          const response = await fetch(panel.dataset.startUrl, {
-            method: "POST",
-            credentials: "same-origin"
-          });
-          if (response.status === 401) {
-            window.location.href = "/login";
-            return;
+      if (form) {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (button) button.disabled = true;
+          sawRunningScan = true;
+          try {
+            const response = await fetch(panel.dataset.startUrl, {
+              method: "POST",
+              credentials: "same-origin"
+            });
+            if (response.status === 401) {
+              window.location.href = "/login";
+              return;
+            }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            setProgress(await response.json());
+            startPolling();
+          } catch (error) {
+            sawRunningScan = false;
+            statusText.textContent = "启动失败";
+            messageText.textContent = "无法启动扫描。";
+            if (button) button.disabled = false;
           }
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          setProgress(await response.json());
-          startPolling();
-        } catch (error) {
-          sawRunningScan = false;
-          statusText.textContent = "启动失败";
-          messageText.textContent = "无法启动扫描。";
-          if (button) button.disabled = false;
-        }
-      });
+        });
+      }
+
+      if (cancelButton) {
+        cancelButton.addEventListener("click", async () => {
+          cancelButton.disabled = true;
+          cancelButton.textContent = "结束中";
+          try {
+            const response = await fetch(panel.dataset.cancelUrl, {
+              method: "POST",
+              credentials: "same-origin"
+            });
+            if (response.status === 401) {
+              window.location.href = "/login";
+              return;
+            }
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            sawRunningScan = false;
+            setProgress(await response.json());
+            stopPolling();
+          } catch (error) {
+            cancelButton.disabled = false;
+            cancelButton.textContent = "强制结束";
+            messageText.textContent = "无法强制结束扫描。";
+          }
+        });
+      }
 
       pollProgress();
     })();

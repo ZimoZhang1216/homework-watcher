@@ -7,6 +7,7 @@ from pathlib import Path
 
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.database import create_session_factory, init_db, list_todos
+from homework_watcher.scan_progress import ScanCancelled
 from homework_watcher.scan_service import ScanService
 from homework_watcher.scanners.base import ScannerContext
 from homework_watcher.scanners.fake import FakeScanner
@@ -87,6 +88,24 @@ class Phase3ScanServiceTests(unittest.TestCase):
                 [(item["platform"], item["course"], item["title"]) for item in result.todos],
                 [("小雅", "结构化学", "作业-08")],
             )
+
+    def test_scan_cancelled_propagates_out_of_service(self) -> None:
+        class CancellableScanner:
+            platform_key = "fake"
+
+            def scan(self, context: ScannerContext) -> list[AssignmentCandidate]:
+                context.emit(50, "正在扫描")
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = service_settings(tmpdir)
+            service = ScanService(settings, scanners=[CancellableScanner()])
+
+            def cancel_progress(_percent: int, _message: str) -> None:
+                raise ScanCancelled()
+
+            with self.assertRaises(ScanCancelled):
+                service.run_scan(platforms=["fake"], progress=cancel_progress)
 
 
 if __name__ == "__main__":

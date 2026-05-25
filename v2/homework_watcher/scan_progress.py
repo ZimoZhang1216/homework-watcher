@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Any
 
 
+class ScanCancelled(RuntimeError):
+    pass
+
+
 @dataclass
 class ScanProgressSnapshot:
     scan_id: str
@@ -37,6 +41,7 @@ class ScanProgressStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._items: dict[str, ScanProgressSnapshot] = {}
+        self._cancelled: set[tuple[str, str]] = set()
 
     def start(self, owner_key: str) -> tuple[ScanProgressSnapshot, bool]:
         with self._lock:
@@ -52,19 +57,14 @@ class ScanProgressStore:
                 started_at=datetime.now(),
             )
             self._items[owner_key] = snapshot
+            self._cancelled.discard((owner_key, snapshot.scan_id))
             return copy_snapshot(snapshot), True
 
     def get(self, owner_key: str) -> ScanProgressSnapshot:
         with self._lock:
             snapshot = self._items.get(owner_key)
             if snapshot is None:
-                return ScanProgressSnapshot(
-                    scan_id="",
-                    owner_key=owner_key,
-                    status="idle",
-                    percent=0,
-                    message="等待扫描",
-                )
+                return idle_snapshot(owner_key)
             return copy_snapshot(snapshot)
 
     def update(self, owner_key: str, scan_id: str, percent: int, message: str) -> None:
@@ -75,10 +75,30 @@ class ScanProgressStore:
             snapshot.percent = clamp_percent(percent)
             snapshot.message = message.strip() or snapshot.message
 
+    def cancel(self, owner_key: str) -> tuple[ScanProgressSnapshot, bool]:
+        with self._lock:
+            snapshot = self._items.get(owner_key)
+            if snapshot is None:
+                return idle_snapshot(owner_key), False
+            if snapshot.status != "running":
+                return copy_snapshot(snapshot), False
+            self._cancelled.add((owner_key, snapshot.scan_id))
+            snapshot.status = "cancelled"
+            snapshot.percent = 100
+            snapshot.message = "扫描已强制结束"
+            snapshot.finished_at = datetime.now()
+            snapshot.error = ""
+            return copy_snapshot(snapshot), True
+
+    def raise_if_cancelled(self, owner_key: str, scan_id: str) -> None:
+        with self._lock:
+            if (owner_key, scan_id) in self._cancelled:
+                raise ScanCancelled("scan cancelled by user")
+
     def finish_success(self, owner_key: str, scan_id: str, result: dict[str, Any]) -> None:
         with self._lock:
             snapshot = self._items.get(owner_key)
-            if snapshot is None or snapshot.scan_id != scan_id:
+            if snapshot is None or snapshot.scan_id != scan_id or snapshot.status != "running":
                 return
             todo_count = len(result.get("todos") or [])
             snapshot.status = "succeeded"
@@ -91,7 +111,7 @@ class ScanProgressStore:
     def finish_failed(self, owner_key: str, scan_id: str, error: str) -> None:
         with self._lock:
             snapshot = self._items.get(owner_key)
-            if snapshot is None or snapshot.scan_id != scan_id:
+            if snapshot is None or snapshot.scan_id != scan_id or snapshot.status != "running":
                 return
             snapshot.status = "failed"
             snapshot.percent = 100
@@ -99,9 +119,31 @@ class ScanProgressStore:
             snapshot.finished_at = datetime.now()
             snapshot.error = error
 
+    def finish_cancelled(self, owner_key: str, scan_id: str) -> None:
+        with self._lock:
+            snapshot = self._items.get(owner_key)
+            if snapshot is None or snapshot.scan_id != scan_id:
+                return
+            self._cancelled.add((owner_key, scan_id))
+            snapshot.status = "cancelled"
+            snapshot.percent = 100
+            snapshot.message = "扫描已强制结束"
+            snapshot.finished_at = snapshot.finished_at or datetime.now()
+            snapshot.error = ""
+
 
 def clamp_percent(percent: int) -> int:
     return min(100, max(0, int(percent)))
+
+
+def idle_snapshot(owner_key: str) -> ScanProgressSnapshot:
+    return ScanProgressSnapshot(
+        scan_id="",
+        owner_key=owner_key,
+        status="idle",
+        percent=0,
+        message="等待扫描",
+    )
 
 
 def copy_snapshot(snapshot: ScanProgressSnapshot) -> ScanProgressSnapshot:
