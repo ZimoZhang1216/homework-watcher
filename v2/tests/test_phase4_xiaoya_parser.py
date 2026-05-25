@@ -126,6 +126,24 @@ class Phase4XiaoyaParserTests(unittest.TestCase):
         )
         self.assertEqual([(item.title, item.status_raw) for item in assignments], [("光学实验报告", "进行中")])
 
+    def test_missing_latest_status_is_inferred_from_future_due_at(self) -> None:
+        assignments = parse_xiaoya_task_text(
+            """
+            大学物理
+            作业任务
+            热学 第 1 次作业(1) \\ 作业 全体 全体 2099-06-02 09:00:00 2099-06-09 23:59:59
+            进入任务
+            """,
+            course="大学物理",
+            task_url="https://example.test/course/physics/task",
+            course_id="physics",
+        )
+
+        self.assertEqual(
+            [(item.title, item.status_raw, item.status_normalized) for item in assignments],
+            [("热学 第 1 次作业(1)", "未提交", "in_progress")],
+        )
+
     def test_xiaoya_bootstrap_loading_is_not_ready(self) -> None:
         text = """
         100%

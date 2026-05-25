@@ -655,6 +655,7 @@ def render_page_script() -> str:
       const track = panel.querySelector(".progress-track");
       let pollTimer = null;
       let reloadTimer = null;
+      let sawRunningScan = false;
 
       const setProgress = (snapshot) => {
         const percent = Math.max(0, Math.min(100, Number(snapshot.percent || 0)));
@@ -691,12 +692,14 @@ def render_page_script() -> str:
           const snapshot = await response.json();
           setProgress(snapshot);
           if (snapshot.status === "running") {
+            sawRunningScan = true;
             if (!pollTimer) pollTimer = window.setInterval(pollProgress, 1000);
             return;
           }
           stopPolling();
-          if (snapshot.status === "succeeded" && !reloadTimer) {
+          if (snapshot.status === "succeeded" && sawRunningScan && !reloadTimer) {
             messageText.textContent = "扫描完成，正在刷新待办。";
+            sawRunningScan = false;
             reloadTimer = window.setTimeout(() => window.location.reload(), 900);
           }
         } catch (error) {
@@ -716,6 +719,7 @@ def render_page_script() -> str:
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (button) button.disabled = true;
+        sawRunningScan = true;
         try {
           const response = await fetch(panel.dataset.startUrl, {
             method: "POST",
@@ -729,6 +733,7 @@ def render_page_script() -> str:
           setProgress(await response.json());
           startPolling();
         } catch (error) {
+          sawRunningScan = false;
           statusText.textContent = "启动失败";
           messageText.textContent = "无法启动扫描。";
           if (button) button.disabled = false;

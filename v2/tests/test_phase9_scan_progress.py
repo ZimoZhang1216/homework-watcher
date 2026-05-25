@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from homework_watcher.app import render_page_script
 from homework_watcher.scan_progress import ScanProgressStore
 
 
@@ -43,6 +44,14 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertEqual(store.get("alice").percent, 80)
         self.assertEqual(store.get("bob").scan_id, bob.scan_id)
         self.assertEqual(store.get("bob").percent, 1)
+
+    def test_success_snapshot_does_not_reload_without_running_scan(self) -> None:
+        script = render_page_script()
+
+        self.assertIn("let sawRunningScan = false;", script)
+        self.assertIn('if (snapshot.status === "running")', script)
+        self.assertIn('sawRunningScan = true;', script)
+        self.assertIn('snapshot.status === "succeeded" && sawRunningScan && !reloadTimer', script)
 
 
 if __name__ == "__main__":

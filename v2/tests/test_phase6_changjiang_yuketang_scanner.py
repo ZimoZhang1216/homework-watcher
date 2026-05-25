@@ -64,6 +64,25 @@ class Phase6ChangjiangYuketangScannerTests(unittest.TestCase):
         self.assertEqual(items[2].status_raw, "不可完成的作业")
         self.assertFalse(items[2].is_todo)
 
+    def test_unknown_yuketang_status_is_treated_as_unfinished(self) -> None:
+        text = """
+        大学物理学基础 II
+        第8章 第 1 次作业(1)
+        满分：10分 共1题 截止时间：2026-06-26/08:00/周五
+        未知
+        """
+
+        items = parse_yuketang_log_text(
+            text,
+            course="大学物理学基础 II",
+            platform=CHANGJIANG_PLATFORM_LABEL,
+            url="https://example.test/course",
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status_raw, "未完成")
+        self.assertTrue(items[0].is_todo)
+
     def test_find_yuketang_datetime_handles_slash_time(self) -> None:
         self.assertEqual(
             find_yuketang_datetime("截止时间：2026-05-26/08:00/周二"),

@@ -259,7 +259,7 @@ def normalize_yuketang_status(lines: list[str]) -> str:
         return "已完成"
     if "已作答" in joined or "已提交" in joined or "已完成" in joined:
         return "已提交"
-    return "未知"
+    return "未完成"
 
 
 def dedupe_assignments(assignments: list[AssignmentCandidate]) -> list[AssignmentCandidate]:

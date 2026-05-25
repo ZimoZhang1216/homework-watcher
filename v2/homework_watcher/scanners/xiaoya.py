@@ -22,7 +22,29 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sy
 
 XIAOYA_PLATFORM_LABEL = "小雅"
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?")
-STATUS_RE = re.compile(r"进行中|未开始|已完成|已截止|未提交|待完成|未完成|已提交|已批阅")
+STATUS_MARKERS = (
+    "进行中",
+    "未开始",
+    "未开放",
+    "未到开始时间",
+    "已完成",
+    "已截止",
+    "已结束",
+    "已关闭",
+    "已过期",
+    "逾期",
+    "未提交",
+    "待提交",
+    "待完成",
+    "未完成",
+    "未交",
+    "未作答",
+    "待作答",
+    "已提交",
+    "已批阅",
+    "已作答",
+)
+STATUS_RE = re.compile("|".join(re.escape(marker) for marker in STATUS_MARKERS))
 MAX_XIAOYA_PAGES = 20
 XIAOYA_BOOTSTRAP_LOADING_MARKERS = (
     "正在加载应用",
@@ -103,10 +125,10 @@ def parse_xiaoya_task_row(
     joined = "\n".join(cleaned)
     dates = DATE_RE.findall(joined)
     status_match = STATUS_RE.search(joined)
-    if not dates or not status_match:
+    if not dates:
         return None
     due_at = parse_xiaoya_due_at(dates[-1])
-    status_raw = status_match.group(0)
+    status_raw = status_match.group(0) if status_match else infer_xiaoya_status_from_due_at(due_at)
     title = extract_title_from_cells(cleaned)
     if not title or is_course_summary(title=title, course=course, status_raw=status_raw, due_at=due_at):
         return None
@@ -178,7 +200,7 @@ def collect_task_text_block(lines: list[str], start_index: int) -> str:
     block = [lines[start_index]]
     for line in lines[start_index + 1 : start_index + 20]:
         current = "\n".join(block)
-        if possible_task_start_line(line) and DATE_RE.search(current) and STATUS_RE.search(current):
+        if possible_task_start_line(line) and DATE_RE.search(current):
             break
         block.append(line)
         if line == "进入任务" and DATE_RE.search(current):
@@ -211,6 +233,11 @@ def parse_xiaoya_due_at(value: str) -> datetime:
     if len(cleaned) == 16:
         return datetime.strptime(cleaned, "%Y-%m-%d %H:%M")
     return datetime.strptime(cleaned, "%Y-%m-%d %H:%M:%S")
+
+
+def infer_xiaoya_status_from_due_at(due_at: datetime, *, now: datetime | None = None) -> str:
+    current = now or datetime.now().replace(microsecond=0)
+    return "未提交" if due_at >= current else "已截止"
 
 
 def is_course_summary(*, title: str, course: str, status_raw: str, due_at: datetime) -> bool:

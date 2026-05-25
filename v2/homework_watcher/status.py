@@ -22,13 +22,13 @@ def normalize_status(value: str | None) -> str:
     text = clean_status_text(value)
     if not text:
         return STATUS_UNKNOWN
-    if any(marker in text for marker in ("已完成", "已提交", "已批阅")):
+    if any(marker in text for marker in ("已完成", "已提交", "已批阅", "已作答")):
         return STATUS_COMPLETED
-    if "已截止" in text or "逾期" in text:
+    if any(marker in text for marker in ("已截止", "逾期", "已结束", "已关闭", "已过期")):
         return STATUS_EXPIRED
-    if any(marker in text for marker in ("进行中", "未提交", "待完成", "未完成")):
+    if any(marker in text for marker in ("进行中", "未提交", "待提交", "待完成", "未完成", "未交", "未作答", "待作答")):
         return STATUS_IN_PROGRESS
-    if "未开始" in text:
+    if any(marker in text for marker in ("未开始", "未开放", "未到开始时间")):
         return STATUS_PENDING
     return STATUS_UNKNOWN
 
