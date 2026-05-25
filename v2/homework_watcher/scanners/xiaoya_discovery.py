@@ -56,7 +56,7 @@ COURSE_URL_KEYS = (
 )
 MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 40
-MAX_CLICK_DISCOVERY_CANDIDATES = 40
+MAX_CLICK_DISCOVERY_CANDIDATES = 24
 COURSE_ACTION_PHRASES = (
     "进入课程",
     "查看详情",
@@ -75,6 +75,7 @@ COURSE_NAME_NOISE = {
     "暂无课程",
     "没有课程",
     "更多",
+    "如何使用本系统",
 }
 SENSITIVE_QUERY_KEYS = ("token", "authorization", "auth", "password", "secret", "session", "cookie")
 
@@ -433,12 +434,15 @@ def discover_course_candidates_by_clicking(
         return []
 
     raw_candidates: list[dict[str, Any]] = []
+    expected_count = expected_course_count_from_mycourse_page(page)
     click_count = min(len(initial_candidates), MAX_CLICK_DISCOVERY_CANDIDATES)
+    if expected_count:
+        remaining = max(0, expected_count - len(known_course_ids))
+        click_count = min(click_count, remaining + 2)
     for index in range(click_count):
         try:
             if not is_mycourse_listing_url(page.url, mycourse_url):
-                page.goto(mycourse_url, wait_until="domcontentloaded", timeout=10000)
-            wait_for_xiaoya_course_candidates(page, timeout_ms=5000)
+                return_to_mycourse_listing(page, mycourse_url)
             click_candidates = mark_xiaoya_click_candidates(page)
             if index >= len(click_candidates):
                 continue
@@ -448,9 +452,9 @@ def discover_course_candidates_by_clicking(
                 continue
             before_url = page.url
             locator = page.locator(f'[data-hw-xiaoya-click-index="{marker}"]').first
-            locator.scroll_into_view_if_needed(timeout=1500)
-            locator.click(timeout=3000)
-            course_id = wait_for_course_id_in_url(page, before_url=before_url, timeout_ms=3500)
+            locator.scroll_into_view_if_needed(timeout=1000)
+            locator.click(timeout=1500)
+            course_id = wait_for_course_id_in_url(page, before_url=before_url, timeout_ms=1500)
             if not course_id or course_id in known_course_ids:
                 continue
             raw_candidates.append(
@@ -467,16 +471,41 @@ def discover_course_candidates_by_clicking(
             known_course_ids.add(course_id)
             if emit is not None:
                 emit(f"[xiaoya-discover] click candidate course_id={course_id} url={sanitize_url_for_log(page.url)}")
+            if expected_count and len(known_course_ids) >= expected_count:
+                break
         except Exception as exc:  # noqa: BLE001 - one card must not block discovery.
             if emit is not None:
                 emit(f"[xiaoya-discover] click skipped index={index + 1} type={type(exc).__name__}")
         finally:
             try:
                 if not is_mycourse_listing_url(page.url, mycourse_url):
-                    page.goto(mycourse_url, wait_until="domcontentloaded", timeout=10000)
+                    return_to_mycourse_listing(page, mycourse_url)
             except Exception:
                 pass
     return dedupe_raw_course_candidates(raw_candidates)
+
+
+def expected_course_count_from_mycourse_page(page: Page) -> int:
+    try:
+        text = str(page.evaluate("() => document.body ? document.body.innerText : ''"))
+    except Exception:
+        return 0
+    return expected_course_count_from_text(text)
+
+
+def expected_course_count_from_text(text: str) -> int:
+    match = re.search(r"正在进行\s*[（(]\s*(?P<count>\d{1,3})\s*[）)]", text)
+    if not match:
+        return 0
+    return int(match.group("count"))
+
+
+def return_to_mycourse_listing(page: Page, mycourse_url: str) -> None:
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=2500)
+        page.wait_for_timeout(300)
+    except Exception:
+        page.goto(mycourse_url, wait_until="domcontentloaded", timeout=3500)
 
 
 def is_mycourse_listing_url(current_url: str, mycourse_url: str) -> bool:

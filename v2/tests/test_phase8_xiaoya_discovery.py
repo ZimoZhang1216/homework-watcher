@@ -8,6 +8,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     course_name_candidates,
     extract_course_id_from_raw,
     extract_course_name_from_raw,
+    expected_course_count_from_text,
     merge_xiaoya_courses,
     raw_course_candidates_from_network_payloads,
 )
@@ -125,6 +126,22 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
         }
 
         self.assertEqual(extract_course_id_from_raw(raw), "")
+
+    def test_help_course_title_is_not_used_as_course_name(self) -> None:
+        raw = {
+            "href": "/app/jx-web/mycourse/010267695964/resource",
+            "absolute_href": "https://nankai.ai-augmented.com/app/jx-web/mycourse/010267695964/resource",
+            "text": "如何使用本系统",
+            "attrs": "",
+            "ancestor_texts": [],
+            "ancestor_attrs": [],
+            "title_texts": ["如何使用本系统"],
+        }
+
+        self.assertEqual(extract_course_name_from_raw(raw, course_id="010267695964"), "")
+
+    def test_expected_active_course_count_from_mycourse_text(self) -> None:
+        self.assertEqual(expected_course_count_from_text("正在进行（14） 即将开课（0） 已结束（14）"), 14)
 
     def test_network_payload_course_candidates(self) -> None:
         payloads = [
