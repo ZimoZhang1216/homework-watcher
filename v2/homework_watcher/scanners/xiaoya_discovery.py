@@ -211,6 +211,7 @@ class XiaoyaCourseDiscoverer:
                 page,
                 mycourse_url=url,
                 existing_course_ids=seen_course_ids,
+                seed_candidates=raw_candidates,
                 emit=emit,
             )
             if click_resolved_candidates:
@@ -319,6 +320,7 @@ def resolve_course_cards_by_clicking(
     *,
     mycourse_url: str,
     existing_course_ids: set[str],
+    seed_candidates: list[dict[str, Any]] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
@@ -338,7 +340,12 @@ def resolve_course_cards_by_clicking(
             break
         seen_page_keys.add(page_key)
 
-        cards = dedupe_course_card_candidates(evaluate_clickable_course_cards(page))
+        page_candidates = []
+        if list_page_no == 1:
+            page_candidates.extend(seed_candidates or [])
+        page_candidates.extend(evaluate_course_candidates(page))
+        page_candidates.extend(evaluate_clickable_course_cards(page))
+        cards = dedupe_course_card_candidates(page_candidates)
         emit_discovery(
             emit,
             f"[xiaoya-discover] click fallback list_page={list_page_no} card candidates={len(cards)}",
