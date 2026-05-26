@@ -6,11 +6,14 @@ from homework_watcher.config_loader import KnownCourseConfig, parse_platform_con
 from homework_watcher.scanners.xiaoya_discovery import (
     build_xiaoya_task_url,
     course_name_candidates,
+    course_name_from_card_text,
+    dedupe_course_card_candidates,
     extract_course_id_from_raw,
     extract_course_name_from_raw,
     expected_course_count_from_text,
     merge_xiaoya_courses,
     raw_course_candidates_from_network_payloads,
+    should_resolve_course_cards_by_click,
 )
 
 
@@ -227,6 +230,95 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
         )
 
         self.assertIn("定量化学分析", names)
+
+    def test_course_name_from_prefixed_card_summary_text(self) -> None:
+        self.assertEqual(
+            course_name_from_card_text(
+                "1 2 2026年春 校内公开 教务开课 LPOC 国家安全教育 "
+                "学院：教务部 许晓,王存刚 52232次 4181人 2026年春 校内公开 教务开课"
+            ),
+            "LPOC 国家安全教育",
+        )
+        self.assertEqual(
+            course_name_from_card_text(
+                "279次 90人 2026年春 校内公开 教务开课 大学物理学基础 I "
+                "学院：大学物理及实验 张连众 279次 90人 2026年春 校内公开 教务开课"
+            ),
+            "大学物理学基础 I",
+        )
+
+    def test_course_name_from_dashboard_noise_is_ignored(self) -> None:
+        self.assertEqual(
+            course_name_from_card_text(
+                "所有的课 所有的课 正在进行 (14) 即将开课 (0) 已结束 (14) "
+                "张子墨 南开大学 学习课程 28 待完成任务 0 未读消息"
+            ),
+            "",
+        )
+
+    def test_dedupe_course_card_candidates_keeps_named_course_cards(self) -> None:
+        cards = dedupe_course_card_candidates(
+            [
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": "所有的课 正在进行 (14) 张子墨 南开大学 学习课程 28 待完成任务 0 未读消息",
+                    "attrs": "",
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                },
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": "2026年春 校内公开 教务开课 大学物理学基础 I 学院：大学物理及实验 张连众",
+                    "attrs": "",
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                },
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": "大学物理学基础 I 学院：大学物理及实验 张连众",
+                    "attrs": "",
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                },
+            ]
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["title_texts"][0], "大学物理学基础 I")
+
+    def test_click_fallback_runs_when_expected_count_exceeds_discovered(self) -> None:
+        raw_candidates = [
+            {
+                "href": "",
+                "absolute_href": "",
+                "text": "大学物理学基础 I 学院：大学物理及实验 张连众 279次 90人 2026年春",
+                "attrs": "",
+                "ancestor_texts": [],
+                "ancestor_attrs": [],
+                "title_texts": [],
+            }
+        ]
+
+        self.assertTrue(
+            should_resolve_course_cards_by_click(
+                raw_candidates,
+                discovered_count=0,
+                expected_count=14,
+            )
+        )
+        self.assertFalse(
+            should_resolve_course_cards_by_click(
+                raw_candidates,
+                discovered_count=14,
+                expected_count=14,
+            )
+        )
 
     def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
         config = parse_platform_config(

@@ -70,6 +70,8 @@ MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 40
 DOM_COURSE_WAIT_MS = 6000
 NETWORK_SETTLE_MS = 2000
+MAX_COURSE_LIST_PAGES = 10
+COURSE_LIST_PAGE_WAIT_MS = 1200
 COURSE_ACTION_PHRASES = (
     "进入课程",
     "查看详情",
@@ -197,6 +199,27 @@ class XiaoyaCourseDiscoverer:
 
         append_candidates(raw_candidates)
 
+        expected_count = expected_course_count_from_page(page)
+        if expected_count:
+            self._emit(emit, f"[xiaoya-discover] expected active course count={expected_count}")
+        if should_resolve_course_cards_by_click(
+            raw_candidates,
+            discovered_count=len(discovered),
+            expected_count=expected_count,
+        ):
+            click_resolved_candidates = resolve_course_cards_by_clicking(
+                page,
+                mycourse_url=url,
+                existing_course_ids=seen_course_ids,
+                emit=emit,
+            )
+            if click_resolved_candidates:
+                self._emit(
+                    emit,
+                    f"[xiaoya-discover] click resolved course candidates count={len(click_resolved_candidates)}",
+                )
+                append_candidates(click_resolved_candidates)
+
         if not discovered:
             dump_xiaoya_discovery_debug(page, self.settings, scan_id=scan_id, reason="no-courses")
         self._emit(emit, f"[xiaoya-discover] discovered count={len(discovered)}")
@@ -271,6 +294,466 @@ def wait_for_xiaoya_course_candidates(page: Page, *, timeout_ms: int) -> list[di
             return last_candidates
         page.wait_for_timeout(500)
     return last_candidates
+
+
+def should_resolve_course_cards_by_click(
+    raw_candidates: list[dict[str, Any]], *, discovered_count: int, expected_count: int
+) -> bool:
+    if expected_count and discovered_count >= expected_count:
+        return False
+    if expected_count and discovered_count < expected_count:
+        return True
+    return any(
+        not extract_course_id_from_raw(candidate)
+        and course_name_from_card_text(raw_text_hint(candidate))
+        for candidate in raw_candidates
+    )
+
+
+def expected_course_count_from_page(page: Page) -> int:
+    return expected_course_count_from_text(read_xiaoya_body_text(page))
+
+
+def resolve_course_cards_by_clicking(
+    page: Page,
+    *,
+    mycourse_url: str,
+    existing_course_ids: set[str],
+    emit: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    seen_course_ids = set(existing_course_ids)
+    attempted_names: set[str] = set()
+    seen_page_keys: set[str] = set()
+
+    for list_page_no in range(1, MAX_COURSE_LIST_PAGES + 1):
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+            emit_discovery(emit, f"[xiaoya-discover] click fallback unable to open list page={list_page_no}")
+            break
+
+        page_text = read_xiaoya_body_text(page)
+        page_key = compact_text_key(page_text)
+        if page_key in seen_page_keys:
+            emit_discovery(emit, f"[xiaoya-discover] click fallback repeated list page={list_page_no}")
+            break
+        seen_page_keys.add(page_key)
+
+        cards = dedupe_course_card_candidates(evaluate_clickable_course_cards(page))
+        emit_discovery(
+            emit,
+            f"[xiaoya-discover] click fallback list_page={list_page_no} card candidates={len(cards)}",
+        )
+        if not cards:
+            break
+
+        page_available = True
+        for card in cards:
+            course_name = course_name_from_card_candidate(card)
+            if not course_name:
+                continue
+            name_key = normalize_course_name(course_name)
+            course_id = extract_course_id_from_raw(card)
+            if course_id:
+                if course_id not in seen_course_ids:
+                    resolved.append(
+                        course_card_to_raw_candidate(
+                            card,
+                            mycourse_url=mycourse_url,
+                            course_name=course_name,
+                            course_id=course_id,
+                        )
+                    )
+                    seen_course_ids.add(course_id)
+                    emit_discovery(
+                        emit,
+                        f"[xiaoya-discover] direct card candidate course={sanitize_log_value(course_name)} "
+                        f"course_id={course_id}",
+                    )
+                attempted_names.add(name_key)
+                continue
+            if name_key in attempted_names:
+                continue
+            attempted_names.add(name_key)
+
+            emit_discovery(
+                emit,
+                f"[xiaoya-discover] resolving card by click page={list_page_no} "
+                f"course={sanitize_log_value(course_name)}",
+            )
+            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+                page_available = False
+                break
+            if not click_xiaoya_course_card(page, course_name):
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-discover] click target not found course={sanitize_log_value(course_name)}",
+                )
+                continue
+            course_id = wait_for_course_id_after_click(page)
+            if not course_id:
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-discover] click did not expose course_id course={sanitize_log_value(course_name)}",
+                )
+                continue
+            if course_id in seen_course_ids:
+                emit_discovery(emit, f"[xiaoya-discover] duplicate clicked course_id skipped course_id={course_id}")
+                continue
+            task_url = build_xiaoya_task_url(mycourse_url, course_id, href=getattr(page, "url", ""))
+            resolved.append(
+                {
+                    "href": task_url,
+                    "absolute_href": task_url,
+                    "text": course_name,
+                    "attrs": f"clicked course_id={course_id}",
+                    "ancestor_texts": [str(card.get("text") or "")],
+                    "ancestor_attrs": [],
+                    "title_texts": [course_name],
+                }
+            )
+            seen_course_ids.add(course_id)
+            emit_discovery(
+                emit,
+                f"[xiaoya-discover] clicked candidate course={sanitize_log_value(course_name)} "
+                f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
+            )
+
+        if not page_available:
+            break
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+            break
+        if not click_next_xiaoya_course_list_page(page):
+            break
+
+    return dedupe_raw_course_candidates(resolved)
+
+
+def open_xiaoya_course_list_page(page: Page, mycourse_url: str, *, page_no: int) -> bool:
+    try:
+        page.goto(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL, wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_timeout(COURSE_LIST_PAGE_WAIT_MS)
+        for _ in range(1, page_no):
+            if not click_next_xiaoya_course_list_page(page):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def click_next_xiaoya_course_list_page(page: Page) -> bool:
+    previous_text = read_xiaoya_body_text(page)
+    try:
+        clicked = bool(
+            page.evaluate(
+                """
+                () => {
+                  const visible = element => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const disabled = element => {
+                    const klass = String(element.className || '');
+                    return Boolean(element.disabled) ||
+                      element.getAttribute('aria-disabled') === 'true' ||
+                      klass.includes('disabled') ||
+                      klass.includes('is-disabled');
+                  };
+                  const selectors = [
+                    '.ant-pagination-next:not(.ant-pagination-disabled)',
+                    'li[title="下一页"]:not(.ant-pagination-disabled)',
+                    '.el-pagination .btn-next:not(:disabled)',
+                    'button[aria-label*="Next"]:not([disabled])',
+                    'button[aria-label*="下一页"]:not([disabled])'
+                  ];
+                  for (const selector of selectors) {
+                    const element = document.querySelector(selector);
+                    if (visible(element) && !disabled(element)) {
+                      element.click();
+                      return true;
+                    }
+                  }
+                  for (const element of Array.from(document.querySelectorAll('button,a,li,span'))) {
+                    const text = (element.innerText || element.getAttribute('aria-label') || element.title || '').trim();
+                    if (!disabled(element) && visible(element) && ['下一页', '>', '›', '»'].includes(text)) {
+                      element.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+        )
+        if not clicked:
+            return False
+        page.wait_for_function(
+            "(oldText) => document.body && document.body.innerText !== oldText",
+            arg=previous_text,
+            timeout=5000,
+        )
+        page.wait_for_timeout(500)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
+    try:
+        raw = page.evaluate(
+            """
+            () => {
+              const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+              const visible = element => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const attrSummary = element => Array.from(element.attributes || [])
+                .map(attr => `${attr.name}=${attr.value}`)
+                .join(' ');
+              const readableText = element => compact(
+                element.innerText || element.textContent || element.getAttribute('title') || ''
+              );
+              const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
+              const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
+              const isCandidate = element => {
+                if (!visible(element)) return false;
+                const text = readableText(element);
+                if (!text || text.length < 4 || text.length > 900) return false;
+                if (navNoise(text)) return false;
+                const combined = [text, attrSummary(element), element.getAttribute('href') || '', element.href || ''].join(' ');
+                return courseContext(combined) || /\\/mycourse\\/\\d{12,}/.test(combined);
+              };
+              const selectors = [
+                '.aia_course_card',
+                '[class*="course-card"]',
+                '[class*="courseCard"]',
+                '[class*="CourseCard"]',
+                '[class*="course_item"]',
+                '[class*="course-item"]',
+                '[class*="mycourse"]',
+                '[class*="course"]',
+                '[class*="Course"]',
+                '.ant-card',
+                'article',
+                'section',
+                'li',
+                'a[href*="/mycourse"]',
+                'div'
+              ];
+              const all = Array.from(new Set(selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))))
+                .filter(isCandidate);
+              const leafCards = all.filter(element => !all.some(other => {
+                if (other === element || !element.contains(other)) return false;
+                const text = readableText(other);
+                return text.length >= 4 && text.length < readableText(element).length;
+              }));
+              return leafCards
+                .sort((a, b) => {
+                  const ar = a.getBoundingClientRect();
+                  const br = b.getBoundingClientRect();
+                  return Math.round(ar.top - br.top) || Math.round(ar.left - br.left);
+                })
+                .slice(0, 80)
+                .map(element => {
+                  const text = readableText(element).slice(0, 900);
+                  const titleTexts = Array.from(
+                    element.querySelectorAll('h1,h2,h3,h4,[class*="title"],[class*="Title"],[class*="name"],[class*="Name"],[title]')
+                  )
+                    .slice(0, 10)
+                    .map(node => compact(node.innerText || node.textContent || node.getAttribute('title') || ''))
+                    .filter(Boolean);
+                  return {
+                    href: element.getAttribute('href') || '',
+                    absolute_href: element.href || '',
+                    text,
+                    attrs: attrSummary(element).slice(0, 1200),
+                    ancestor_texts: [text],
+                    ancestor_attrs: [],
+                    title_texts: titleTexts,
+                  };
+                });
+            }
+            """
+        )
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def dedupe_course_card_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        course_name = course_name_from_card_candidate(candidate)
+        if not course_name:
+            continue
+        key = normalize_course_name(course_name)
+        enriched = dict(candidate)
+        title_texts = list(enriched.get("title_texts") or [])
+        if course_name not in title_texts:
+            title_texts.insert(0, course_name)
+        enriched["title_texts"] = title_texts
+        existing = by_name.get(key)
+        if existing is None:
+            by_name[key] = enriched
+            order.append(key)
+            continue
+        if extract_course_id_from_raw(enriched) and not extract_course_id_from_raw(existing):
+            by_name[key] = enriched
+    return [by_name[key] for key in order]
+
+
+def course_name_from_card_candidate(candidate: dict[str, Any]) -> str:
+    blocks: list[str] = []
+    blocks.extend(str(value) for value in candidate.get("title_texts") or [])
+    blocks.append(raw_text_hint(candidate))
+    for block in blocks:
+        course_name = course_name_from_card_text(block)
+        if course_name:
+            return course_name
+    return ""
+
+
+def course_name_from_card_text(text: str) -> str:
+    candidates = course_name_candidates(text, course_id="")
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda name: course_name_score(name, 0))
+
+
+def course_card_to_raw_candidate(
+    candidate: dict[str, Any], *, mycourse_url: str, course_name: str, course_id: str
+) -> dict[str, Any]:
+    task_url = build_xiaoya_task_url(
+        mycourse_url,
+        course_id,
+        href=raw_href(candidate),
+    )
+    return {
+        "href": task_url,
+        "absolute_href": task_url,
+        "text": course_name,
+        "attrs": f"{candidate.get('attrs') or ''} course_id={course_id}",
+        "ancestor_texts": [raw_text_hint(candidate)],
+        "ancestor_attrs": list(candidate.get("ancestor_attrs") or []),
+        "title_texts": [course_name],
+    }
+
+
+def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (courseName) => {
+                  const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                  const visible = element => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const attrSummary = element => Array.from(element.attributes || [])
+                    .map(attr => `${attr.name}=${attr.value}`)
+                    .join(' ');
+                  const readableText = element => compact(
+                    element.innerText || element.textContent || element.getAttribute('title') || ''
+                  );
+                  const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
+                  const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
+                  const isCandidate = element => {
+                    if (!visible(element)) return false;
+                    const text = readableText(element);
+                    if (!text || text.length < 4 || text.length > 900) return false;
+                    if (navNoise(text)) return false;
+                    const combined = [text, attrSummary(element), element.getAttribute('href') || '', element.href || ''].join(' ');
+                    return (text.includes(courseName) && courseContext(combined)) || /\\/mycourse\\/\\d{12,}/.test(combined);
+                  };
+                  const selectors = [
+                    '.aia_course_card',
+                    '[class*="course-card"]',
+                    '[class*="courseCard"]',
+                    '[class*="CourseCard"]',
+                    '[class*="course_item"]',
+                    '[class*="course-item"]',
+                    '[class*="mycourse"]',
+                    '[class*="course"]',
+                    '[class*="Course"]',
+                    '.ant-card',
+                    'article',
+                    'section',
+                    'li',
+                    'a[href*="/mycourse"]',
+                    'div'
+                  ];
+                  const all = Array.from(new Set(selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))))
+                    .filter(isCandidate);
+                  const cards = all.filter(element => !all.some(other => {
+                    if (other === element || !element.contains(other)) return false;
+                    const text = readableText(other);
+                    return text.includes(courseName) && text.length >= 4 && text.length < readableText(element).length;
+                  }));
+                  const card = cards.find(element => readableText(element).includes(courseName));
+                  if (!card) return false;
+                  const clickables = [
+                    card,
+                    ...Array.from(card.querySelectorAll('a[href],button,[role="button"],[onclick],[tabindex],[class*="course"],[class*="card"]')),
+                  ];
+                  let current = card.parentElement;
+                  for (let depth = 0; current && depth < 4; depth += 1) {
+                    clickables.push(current);
+                    current = current.parentElement;
+                  }
+                  const target = clickables.find(element => {
+                    if (!visible(element)) return false;
+                    const text = readableText(element);
+                    const signal = element.matches('a[href],button,[role="button"],[onclick],[tabindex]') ||
+                      /course|card|item/i.test(String(element.className || ''));
+                    return signal && (text.includes(courseName) || card.contains(element) || element.contains(card));
+                  }) || card;
+                  target.scrollIntoView({block: 'center', inline: 'center'});
+                  target.click();
+                  return true;
+                }
+                """,
+                course_name,
+            )
+        )
+    except Exception:
+        return False
+
+
+def wait_for_course_id_after_click(page: Page, *, timeout_ms: int = 8000) -> str:
+    deadline = monotonic_time.monotonic() + max(timeout_ms, 1000) / 1000
+    while monotonic_time.monotonic() < deadline:
+        course_id = extract_course_id(str(getattr(page, "url", "") or ""))
+        if course_id:
+            return course_id
+        page.wait_for_timeout(300)
+    return extract_course_id(str(getattr(page, "url", "") or ""))
+
+
+def read_xiaoya_body_text(page: Page) -> str:
+    try:
+        return str(page.evaluate("() => document.body ? document.body.innerText : ''"))
+    except Exception:
+        return ""
+
+
+def compact_text_key(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")[:4000]
+
+
+def emit_discovery(emit: Callable[[str], None] | None, message: str) -> None:
+    if emit is not None:
+        emit(message)
 
 
 def collect_xiaoya_network_payload(response: Any, *, mycourse_url: str, payloads: list[dict[str, str]]) -> None:
@@ -690,27 +1173,37 @@ def course_name_candidates(text: str, *, course_id: str) -> list[str]:
 
 def course_name_fragments(line: str) -> list[str]:
     fragments = [line]
-    for marker in (
-        " 学院：",
-        " 学院:",
-        " 院系：",
-        " 院系:",
-        " 教师：",
-        " 教师:",
-        " 老师：",
-        " 老师:",
-        " 校内公开",
-        " 教务开课",
-        " 访问量",
-    ):
-        if marker in line:
-            fragments.append(line.split(marker, 1)[0])
-    stats_match = re.search(r"(?P<name>.+?)\s+\d+次\s+\d+人\b", line)
-    if stats_match:
-        fragments.append(stats_match.group("name"))
-    term_match = re.search(r"(?P<name>.+?)\s+202\d年(?:春|夏|秋|冬)?\b", line)
-    if term_match:
-        fragments.append(term_match.group("name"))
+    metadata_prefix_match = re.search(
+        r"(?:^|\s)(?:\d+\s+)*202\d年(?:春|夏|秋|冬)?\s+校内公开\s+教务开课\s+(?P<name>.+)",
+        line,
+    )
+    if metadata_prefix_match:
+        fragments.append(metadata_prefix_match.group("name"))
+    open_course_match = re.search(r"教务开课\s+(?P<name>.+?)(?:\s+学院[:：]|\s+\d+次\s+\d+人\b|$)", line)
+    if open_course_match:
+        fragments.append(open_course_match.group("name"))
+    for fragment in list(fragments):
+        for marker in (
+            " 学院：",
+            " 学院:",
+            " 院系：",
+            " 院系:",
+            " 教师：",
+            " 教师:",
+            " 老师：",
+            " 老师:",
+            " 校内公开",
+            " 教务开课",
+            " 访问量",
+        ):
+            if marker in fragment:
+                fragments.append(fragment.split(marker, 1)[0])
+        stats_match = re.search(r"(?P<name>.+?)\s+\d+次\s+\d+人\b", fragment)
+        if stats_match:
+            fragments.append(stats_match.group("name"))
+        term_match = re.search(r"(?P<name>.+?)\s+202\d年(?:春|夏|秋|冬)?\b", fragment)
+        if term_match:
+            fragments.append(term_match.group("name"))
     return fragments
 
 
@@ -729,6 +1222,12 @@ def valid_course_name(name: str, *, course_id: str) -> bool:
         return False
     if len(name) < 2 or len(name) > 200:
         return False
+    if re.match(r"^(?:\d+\s+)*202\d年", name):
+        return False
+    if re.match(r"^\d+次\s+\d+人\b", name):
+        return False
+    if re.search(r"待完成任务|未读消息|用户协议|隐私政策|浏览器版本要求|使用帮助", name):
+        return False
     if course_id and course_id in name:
         return False
     if "http://" in name or "https://" in name or "/mycourse/" in name:
@@ -743,7 +1242,13 @@ def valid_course_name(name: str, *, course_id: str) -> bool:
 
 
 def looks_like_course_nav_text(text: str) -> bool:
-    return bool(re.search(r"我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行", text))
+    return bool(
+        re.search(
+            r"我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|"
+            r"待完成任务.*未读消息|南开大学.*学习课程|用户协议|隐私政策",
+            text,
+        )
+    )
 
 
 def looks_like_course_card_text(text: str) -> bool:
