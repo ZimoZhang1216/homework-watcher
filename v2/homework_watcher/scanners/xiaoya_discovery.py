@@ -31,6 +31,16 @@ COURSE_ID_KEYWORDS = (
     "course",
     "id",
 )
+JSON_COURSE_NAME_KEYS = {"name", "title", "coursename", "course_name"}
+JSON_COURSE_ID_KEYS = {
+    "id",
+    "courseid",
+    "course_id",
+    "teachcourseid",
+    "teach_course_id",
+    "classroomid",
+    "classroom_id",
+}
 COURSE_NAME_KEYS = (
     "coursename",
     "course_name",
@@ -67,7 +77,7 @@ COURSE_CONTEXT_KEYS = (
     "open",
 )
 MAX_NETWORK_JSON_BYTES = 2_000_000
-MAX_NETWORK_PAYLOADS = 40
+MAX_NETWORK_PAYLOADS = 120
 DISCOVERY_LOAD_TIMEOUT_MS = 15000
 DISCOVERY_EXTRACT_TIMEOUT_MS = 15000
 DOM_COURSE_WAIT_MS = 6000
@@ -934,15 +944,13 @@ def collect_xiaoya_network_payload(response: Any, *, mycourse_url: str, payloads
         if not same_origin_or_xiaoya(response_url, mycourse_url):
             return
         content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "").lower()
-        lower_url = response_url.lower()
-        if "json" not in content_type and not any(
-            marker in lower_url for marker in ("course", "mycourse", "jx-web", "teaching")
-        ):
-            return
         body = response.text()
         if not body or len(body) > MAX_NETWORK_JSON_BYTES:
             return
-        if body.lstrip()[:1] not in ("{", "["):
+        stripped_body = body.lstrip()
+        if "json" not in content_type and stripped_body[:1] not in ("{", "["):
+            return
+        if stripped_body[:1] not in ("{", "["):
             return
         payloads.append({"url": response_url, "body": body})
     except Exception:
@@ -958,11 +966,12 @@ def raw_course_candidates_from_network_payloads(
             data = json.loads(payload.get("body") or "")
         except (TypeError, json.JSONDecodeError):
             continue
+        source_url = payload.get("url", "")
         for mapping in iter_json_mappings(data):
-            course_id = extract_course_id_from_mapping(mapping)
+            course_id = extract_course_id_from_json_course_object(mapping, source_url=source_url)
             if not course_id:
                 continue
-            course_name = extract_course_name_from_mapping(mapping, course_id=course_id)
+            course_name = extract_course_name_from_json_course_object(mapping, course_id=course_id)
             if not course_name:
                 continue
             href = extract_course_href_from_mapping(mapping, mycourse_url=mycourse_url, course_id=course_id)
@@ -971,7 +980,7 @@ def raw_course_candidates_from_network_payloads(
                     "href": href,
                     "absolute_href": urljoin(mycourse_url, href) if href else "",
                     "text": course_name,
-                    "attrs": f"network_url={payload.get('url', '')} course_id={course_id}",
+                    "attrs": f"network_json_url={sanitize_url_for_log(source_url)} course_id={course_id}",
                     "ancestor_texts": [],
                     "ancestor_attrs": [],
                     "title_texts": [course_name],
@@ -992,6 +1001,50 @@ def iter_json_mappings(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
         for child in value[:1000]:
             mappings.extend(iter_json_mappings(child, depth=depth + 1))
     return mappings
+
+
+def extract_course_id_from_json_course_object(mapping: dict[str, Any], *, source_url: str = "") -> str:
+    name_values = json_course_name_values(mapping)
+    id_values = json_course_id_values(mapping, source_url=source_url)
+    if not name_values or not id_values:
+        return ""
+    return extract_course_id(*id_values)
+
+
+def extract_course_name_from_json_course_object(mapping: dict[str, Any], *, course_id: str) -> str:
+    candidates: list[str] = []
+    for value_text in json_course_name_values(mapping):
+        candidates.extend(course_name_candidates(value_text, course_id=course_id))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda name: course_name_score(name, 0))
+
+
+def json_course_name_values(mapping: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        if key_norm not in JSON_COURSE_NAME_KEYS:
+            continue
+        value_text = stringify_json_scalar(value)
+        if value_text:
+            values.append(value_text)
+    return values
+
+
+def json_course_id_values(mapping: dict[str, Any], *, source_url: str = "") -> list[str]:
+    values: list[str] = []
+    has_course_context = mapping_has_course_hint(mapping) or url_has_course_hint(source_url)
+    for key, value in mapping.items():
+        key_norm = normalize_json_key(key)
+        if key_norm not in JSON_COURSE_ID_KEYS:
+            continue
+        if key_norm == "id" and not has_course_context:
+            continue
+        value_text = stringify_json_scalar(value)
+        if value_text and extract_course_id(value_text):
+            values.append(value_text)
+    return values
 
 
 def extract_course_id_from_mapping(mapping: dict[str, Any]) -> str:
@@ -1081,6 +1134,10 @@ def mapping_has_course_hint(mapping: dict[str, Any]) -> bool:
     if context_key_hits >= 2 and extract_course_id(json.dumps(mapping, ensure_ascii=False)[:4000]):
         return True
     return False
+
+
+def url_has_course_hint(url: str) -> bool:
+    return any(marker in str(url or "").lower() for marker in ("course", "mycourse", "teaching", "classroom"))
 
 
 def same_origin_or_xiaoya(response_url: str, mycourse_url: str) -> bool:

@@ -5,6 +5,7 @@ import unittest
 from homework_watcher.config_loader import KnownCourseConfig, parse_platform_config
 from homework_watcher.scanners.xiaoya_discovery import (
     build_xiaoya_task_url,
+    collect_xiaoya_network_payload,
     course_name_candidates,
     course_name_from_card_candidate,
     course_name_from_card_text,
@@ -17,6 +18,16 @@ from homework_watcher.scanners.xiaoya_discovery import (
     raw_course_candidates_from_network_payloads,
     should_resolve_course_cards_by_click,
 )
+
+
+class FakeResponse:
+    def __init__(self, *, url: str, body: str, content_type: str = "application/json") -> None:
+        self.url = url
+        self.headers = {"content-type": content_type}
+        self._body = body
+
+    def text(self) -> str:
+        return self._body
 
 
 class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
@@ -238,6 +249,79 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             extract_course_name_from_raw(candidates[0], course_id="6902425978165806721"),
             "大学物理学基础 II",
         )
+
+    def test_network_payload_recurses_all_json_for_course_objects(self) -> None:
+        payloads = [
+            {
+                "url": "https://nankai.ai-augmented.com/api/jw-starcmooc/query",
+                "body": """
+                {
+                  "payload": {
+                    "tabs": [
+                      {
+                        "items": [
+                          {
+                            "title": "结构化学",
+                            "teachCourseId": "6902426124991620398"
+                          },
+                          {
+                            "course_name": "高等数学（B类）II",
+                            "classroomId": 6902426104825404425
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+                """,
+            }
+        ]
+
+        candidates = raw_course_candidates_from_network_payloads(
+            payloads,
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+
+        self.assertEqual(
+            [extract_course_id_from_raw(candidate) for candidate in candidates],
+            ["6902426124991620398", "6902426104825404425"],
+        )
+        self.assertEqual(candidates[0]["text"], "结构化学")
+        self.assertEqual(
+            candidates[0]["href"],
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
+
+    def test_network_payload_sanitizes_sensitive_query_in_candidate_attrs(self) -> None:
+        payloads = [
+            {
+                "url": "https://nankai.ai-augmented.com/api/list?token=secret&ok=1",
+                "body": '{"data": [{"courseName": "大学物理学基础 II", "courseId": "6902425978165806721"}]}',
+            }
+        ]
+
+        candidates = raw_course_candidates_from_network_payloads(
+            payloads,
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("token=%3Credacted%3E", candidates[0]["attrs"])
+        self.assertNotIn("secret", candidates[0]["attrs"])
+
+    def test_collect_network_payload_accepts_unmarked_json_response(self) -> None:
+        payloads: list[dict[str, str]] = []
+
+        collect_xiaoya_network_payload(
+            FakeResponse(
+                url="https://nankai.ai-augmented.com/api/common/list",
+                body='{"data": [{"courseName": "结构化学", "courseId": "6902426124991620398"}]}',
+            ),
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+            payloads=payloads,
+        )
+
+        self.assertEqual(len(payloads), 1)
 
     def test_course_name_from_card_summary_text(self) -> None:
         names = course_name_candidates(
