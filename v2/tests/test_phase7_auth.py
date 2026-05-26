@@ -9,6 +9,7 @@ from homework_watcher.auth import (
     authenticate_user,
     create_session_token,
     create_user,
+    validate_username,
     read_session_username,
     verify_password,
 )
@@ -54,6 +55,10 @@ class Phase7AuthTests(unittest.TestCase):
             with session_factory() as session:
                 with self.assertRaises(AuthError):
                     create_user(session, username="alice", password="short")
+
+    def test_invalid_account_message_uses_student_id_wording(self) -> None:
+        with self.assertRaisesRegex(AuthError, "学号"):
+            validate_username("!")
 
     def test_signed_session_token(self) -> None:
         token = create_session_token("alice", "secret", now=1000)

@@ -20,12 +20,12 @@ def main(argv: list[str] | None = None) -> int:
     health_parser.set_defaults(handler=cmd_health)
 
     db_list_parser = subparsers.add_parser("db-list", help="输出 assignments 表记录")
-    db_list_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
+    db_list_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     db_list_parser.set_defaults(handler=cmd_db_list)
 
     scan_parser = subparsers.add_parser("scan", help="执行统一扫描服务")
     scan_parser.add_argument("--platform", action="append", dest="platforms", help="限制扫描平台，可重复")
-    scan_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
+    scan_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     scan_parser.set_defaults(handler=cmd_scan)
 
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
@@ -34,19 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     scan_known_xiaoya_parser = subparsers.add_parser(
         "scan-known-xiaoya", help="扫描小雅配置的 known_courses 并输出诊断结果"
     )
-    scan_known_xiaoya_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
+    scan_known_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     scan_known_xiaoya_parser.set_defaults(handler=cmd_scan_known_xiaoya)
 
     discover_xiaoya_parser = subparsers.add_parser(
         "discover-xiaoya-courses", help="只发现小雅课程，不写 assignments"
     )
-    discover_xiaoya_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
+    discover_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     discover_xiaoya_parser.set_defaults(handler=cmd_discover_xiaoya_courses)
 
     scan_xiaoya_auto_parser = subparsers.add_parser(
         "scan-xiaoya-auto", help="执行完整小雅自动课程发现和任务页扫描"
     )
-    scan_xiaoya_auto_parser.add_argument("--user", default="default", help="账号用户名，默认 default")
+    scan_xiaoya_auto_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     scan_xiaoya_auto_parser.set_defaults(handler=cmd_scan_xiaoya_auto)
 
     args = parser.parse_args(argv)

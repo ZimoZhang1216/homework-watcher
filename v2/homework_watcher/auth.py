@@ -46,7 +46,7 @@ def normalize_username(username: str) -> str:
 def validate_username(username: str) -> str:
     normalized = normalize_username(username)
     if not USERNAME_RE.fullmatch(normalized):
-        raise AuthError("用户名只能使用 3-64 位小写字母、数字、点、下划线或短横线。")
+        raise AuthError("学号只能使用 3-64 位小写字母、数字、点、下划线或短横线。")
     return normalized
 
 
@@ -60,7 +60,7 @@ def create_user(session: Session, *, username: str, password: str, display_name:
     validate_password(password)
     existing = session.scalar(select(User).where(User.username == normalized))
     if existing is not None:
-        raise AuthError("这个用户名已经存在。")
+        raise AuthError("这个学号已经存在。")
     now = datetime.now()
     user = User(
         username=normalized,

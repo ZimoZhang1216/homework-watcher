@@ -68,6 +68,7 @@ def create_app() -> FastAPI:
                     <h2>当前待办</h2>
                     <span class="count">{len(todos)}</span>
                   </div>
+                  <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。点击“立即扫描”会读取已登录平台的作业列表，不会提交或修改平台内容。</p>
                   {render_assignment_table(todos)}
                   <div class="actions">
                     <form method="post" action="/scan?redirect=1" id="scan-form">
@@ -104,7 +105,7 @@ def create_app() -> FastAPI:
                 password=fields.get("password", ""),
             )
         if user is None:
-            return redirect_to_login("用户名或密码不正确。")
+            return redirect_to_login("学号或密码不正确。")
         response = RedirectResponse("/", status_code=303)
         set_auth_cookie(response, user.username, settings)
         return response
@@ -418,17 +419,19 @@ def render_auth_panel(error: str = "") -> str:
     <section class="panel auth-panel">
       <div>
         <h2>登录</h2>
+        <p class="muted page-note">请使用学号登录本站；平台登录态需要在进入系统后单独授权。</p>
         {error_html}
         <form method="post" action="/login" class="auth-form">
-          <label>用户名<input name="username" autocomplete="username" required></label>
+          <label>学号<input name="username" autocomplete="username" inputmode="numeric" required></label>
           <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
           <button type="submit">登录</button>
         </form>
       </div>
       <div>
         <h2>注册</h2>
+        <p class="muted page-note">显示名只用于页面展示，可以继续填写姓名或昵称。</p>
         <form method="post" action="/register" class="auth-form">
-          <label>用户名<input name="username" autocomplete="username" required></label>
+          <label>学号<input name="username" autocomplete="username" inputmode="numeric" required></label>
           <label>显示名<input name="display_name" autocomplete="name"></label>
           <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
           <button type="submit" class="secondary">创建账号</button>
@@ -562,12 +565,12 @@ def render_assignment_table(assignments: list[dict[str, object]]) -> str:
         link = f'<a href="{escape(url)}" target="_blank" rel="noreferrer">{title}</a>' if url else title
         rows.append(
             "<tr>"
-            f"<td>{escape(str(item.get('platform') or ''))}</td>"
-            f"<td>{escape(str(item.get('course') or ''))}</td>"
-            f"<td>{link}</td>"
-            f"<td>{escape(str(item.get('status_raw') or ''))}</td>"
-            f"<td>{escape(str(item.get('due_at') or ''))}</td>"
-            f"<td>{escape(format_due_distance(item.get('due_at')))}</td>"
+            f"<td data-label=\"平台\">{escape(str(item.get('platform') or ''))}</td>"
+            f"<td data-label=\"课程\">{escape(str(item.get('course') or ''))}</td>"
+            f"<td data-label=\"标题\">{link}</td>"
+            f"<td data-label=\"状态\">{escape(str(item.get('status_raw') or ''))}</td>"
+            f"<td data-label=\"截止时间\">{escape(str(item.get('due_at') or ''))}</td>"
+            f"<td data-label=\"距今时间\">{escape(format_due_distance(item.get('due_at')))}</td>"
             "</tr>"
         )
     return (
@@ -686,6 +689,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     }}
     .panel + .panel {{ margin-top: 18px; }}
     .panel-title {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
+    .page-note {{ max-width: 760px; margin: 10px 0 18px; }}
     .count {{
       display: inline-flex;
       min-width: 30px;
@@ -811,7 +815,41 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       header {{ align-items: flex-start; flex-direction: column; }}
       h1 {{ font-size: 30px; }}
       .panel {{ padding: 18px; }}
+      .panel-title {{ align-items: flex-start; }}
+      .page-note {{ margin-bottom: 16px; }}
+      .actions {{ flex-direction: column; }}
+      .actions > *, .actions form, .actions button, .actions .button-link {{ width: 100%; }}
+      .actions button, .actions .button-link {{ box-sizing: border-box; }}
+      .auth-form button {{ width: 100%; }}
+      .progress-actions {{ justify-content: stretch; }}
+      .progress-actions button {{ width: 100%; }}
       .account {{ flex-wrap: wrap; }}
+      .account button.compact {{ width: auto; }}
+      table {{ min-width: 0; }}
+      thead {{ display: none; }}
+      tbody, tr, td {{ display: block; }}
+      tbody tr {{
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: var(--surface-subtle);
+      }}
+      tbody tr + tr {{ margin-top: 12px; }}
+      td {{
+        display: grid;
+        grid-template-columns: 82px minmax(0, 1fr);
+        gap: 10px;
+        border-top: 0;
+        padding: 8px 0;
+      }}
+      td::before {{
+        content: attr(data-label);
+        color: var(--muted);
+        font-weight: 800;
+      }}
+      td a {{ overflow-wrap: anywhere; }}
+      pre {{ max-height: 480px; font-size: 13px; }}
+      footer {{ overflow-wrap: anywhere; }}
     }}
 	  </style>
 </head>

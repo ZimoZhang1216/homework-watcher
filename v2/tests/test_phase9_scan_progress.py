@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from homework_watcher.app import format_due_distance, render_assignment_table, render_page_script
+from homework_watcher.app import (
+    format_due_distance,
+    render_assignment_table,
+    render_auth_panel,
+    render_page_script,
+)
 from homework_watcher.scan_progress import ScanCancelled, ScanProgressStore
 
 
@@ -93,7 +98,15 @@ class Phase9ScanProgressTests(unittest.TestCase):
         )
 
         self.assertIn("距今时间", table)
+        self.assertIn('data-label="课程"', table)
         self.assertNotIn("最后发现", table)
+
+    def test_auth_panel_uses_student_id_wording(self) -> None:
+        panel = render_auth_panel()
+
+        self.assertIn("学号", panel)
+        self.assertIn("显示名", panel)
+        self.assertNotIn("用户名", panel)
 
     def test_format_due_distance(self) -> None:
         self.assertEqual(
