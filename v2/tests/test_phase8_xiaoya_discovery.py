@@ -6,6 +6,7 @@ from homework_watcher.config_loader import KnownCourseConfig, parse_platform_con
 from homework_watcher.scanners.xiaoya_discovery import (
     build_xiaoya_task_url,
     course_name_candidates,
+    course_name_from_card_candidate,
     course_name_from_card_text,
     dedupe_course_card_candidates,
     extract_course_id_from_raw,
@@ -256,6 +257,26 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             "",
         )
 
+    def test_course_name_uses_xiaoya_click_tracking_name(self) -> None:
+        self.assertEqual(
+            course_name_from_card_candidate(
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": "2026年春 校内公开 教务开课 大学物理学基础 Ⅰ 学院：大学物理及实验 张连众",
+                    "attrs": (
+                        "class=aia_course_card xy_animation__hover_upward_floating "
+                        "data-xy-click-pt-name=大学物理学基础 Ⅰ "
+                        "data-xy-click-pt=enter-course data-xy-click-pt-element-type=3"
+                    ),
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                }
+            ),
+            "大学物理学基础 Ⅰ",
+        )
+
     def test_dedupe_course_card_candidates_keeps_named_course_cards(self) -> None:
         cards = dedupe_course_card_candidates(
             [
@@ -291,6 +312,40 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["title_texts"][0], "大学物理学基础 I")
+
+    def test_dedupe_course_card_candidates_prefers_real_xiaoya_card(self) -> None:
+        cards = dedupe_course_card_candidates(
+            [
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": (
+                        "我的课程 我学的课 正在进行 (14) 2026年春 校内公开 教务开课 "
+                        "大学物理学基础 Ⅰ 学院：大学物理及实验 张连众 279次 90人"
+                    ),
+                    "attrs": "id=root",
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                },
+                {
+                    "href": "",
+                    "absolute_href": "",
+                    "text": "2026年春 校内公开 教务开课 大学物理学基础 Ⅰ 学院：大学物理及实验 张连众 279次 90人",
+                    "attrs": (
+                        "class=aia_course_card xy_animation__hover_upward_floating "
+                        "data-xy-click-pt-name=大学物理学基础 Ⅰ "
+                        "data-xy-click-pt=enter-course data-xy-click-pt-element-type=3"
+                    ),
+                    "ancestor_texts": [],
+                    "ancestor_attrs": [],
+                    "title_texts": [],
+                },
+            ]
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertIn("data-xy-click-pt=enter-course", cards[0]["attrs"])
 
     def test_click_fallback_runs_when_expected_count_exceeds_discovered(self) -> None:
         raw_candidates = [

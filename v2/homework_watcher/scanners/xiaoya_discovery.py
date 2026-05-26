@@ -525,17 +525,26 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
               const readableText = element => compact(
                 element.innerText || element.textContent || element.getAttribute('title') || ''
               );
+              const clickName = element => compact(element.getAttribute('data-xy-click-pt-name') || '');
+              const isCourseCard = element => (
+                element.getAttribute('data-xy-click-pt') === 'enter-course' ||
+                String(element.className || '').includes('aia_course_card')
+              );
               const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
               const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
               const isCandidate = element => {
                 if (!visible(element)) return false;
                 const text = readableText(element);
+                const name = clickName(element);
+                if (name && isCourseCard(element)) return true;
                 if (!text || text.length < 4 || text.length > 900) return false;
                 if (navNoise(text)) return false;
                 const combined = [text, attrSummary(element), element.getAttribute('href') || '', element.href || ''].join(' ');
                 return courseContext(combined) || /\\/mycourse\\/\\d{12,}/.test(combined);
               };
               const selectors = [
+                '[data-xy-click-pt="enter-course"]',
+                '[data-xy-click-pt-name]',
                 '.aia_course_card',
                 '[class*="course-card"]',
                 '[class*="courseCard"]',
@@ -554,12 +563,14 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
               ];
               const all = Array.from(new Set(selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))))
                 .filter(isCandidate);
+              const preferredCards = all.filter(isCourseCard);
               const leafCards = all.filter(element => !all.some(other => {
                 if (other === element || !element.contains(other)) return false;
                 const text = readableText(other);
                 return text.length >= 4 && text.length < readableText(element).length;
               }));
-              return leafCards
+              const cards = preferredCards.length ? preferredCards : leafCards;
+              return cards
                 .sort((a, b) => {
                   const ar = a.getBoundingClientRect();
                   const br = b.getBoundingClientRect();
@@ -567,6 +578,7 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                 })
                 .slice(0, 80)
                 .map(element => {
+                  const name = clickName(element);
                   const text = readableText(element).slice(0, 900);
                   const titleTexts = Array.from(
                     element.querySelectorAll('h1,h2,h3,h4,[class*="title"],[class*="Title"],[class*="name"],[class*="Name"],[title]')
@@ -574,6 +586,7 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                     .slice(0, 10)
                     .map(node => compact(node.innerText || node.textContent || node.getAttribute('title') || ''))
                     .filter(Boolean);
+                  if (name) titleTexts.unshift(name);
                   return {
                     href: element.getAttribute('href') || '',
                     absolute_href: element.href || '',
@@ -612,13 +625,38 @@ def dedupe_course_card_candidates(candidates: list[dict[str, Any]]) -> list[dict
             by_name[key] = enriched
             order.append(key)
             continue
+        if course_card_candidate_score(enriched) > course_card_candidate_score(existing):
+            by_name[key] = enriched
+            continue
         if extract_course_id_from_raw(enriched) and not extract_course_id_from_raw(existing):
             by_name[key] = enriched
     return [by_name[key] for key in order]
 
 
+def course_card_candidate_score(candidate: dict[str, Any]) -> int:
+    attrs = str(candidate.get("attrs") or "")
+    text = raw_text_hint(candidate)
+    score = 0
+    if "data-xy-click-pt=enter-course" in attrs:
+        score += 100
+    if "aia_course_card" in attrs:
+        score += 80
+    if "data-xy-click-pt-name=" in attrs:
+        score += 60
+    if extract_course_id_from_raw(candidate):
+        score += 40
+    if len(text) <= 900:
+        score += 20
+    score -= min(len(text), 2000) // 100
+    return score
+
+
 def course_name_from_card_candidate(candidate: dict[str, Any]) -> str:
     blocks: list[str] = []
+    attrs = str(candidate.get("attrs") or "")
+    click_name = attr_value_from_summary(attrs, "data-xy-click-pt-name")
+    if click_name:
+        blocks.append(click_name)
     blocks.extend(str(value) for value in candidate.get("title_texts") or [])
     blocks.append(raw_text_hint(candidate))
     for block in blocks:
@@ -626,6 +664,12 @@ def course_name_from_card_candidate(candidate: dict[str, Any]) -> str:
         if course_name:
             return course_name
     return ""
+
+
+def attr_value_from_summary(attrs: str, name: str) -> str:
+    pattern = rf"(?:^|\s){re.escape(name)}=(?P<value>.*?)(?=\s[\w:-]+=|$)"
+    match = re.search(pattern, attrs)
+    return match.group("value").strip() if match else ""
 
 
 def course_name_from_card_text(text: str) -> str:
@@ -673,17 +717,37 @@ def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
                   const readableText = element => compact(
                     element.innerText || element.textContent || element.getAttribute('title') || ''
                   );
+                  const comparable = value => compact(value)
+                    .replace(/Ⅰ/g, 'I')
+                    .replace(/Ⅱ/g, 'II')
+                    .replace(/Ⅲ/g, 'III')
+                    .replace(/Ⅳ/g, 'IV')
+                    .replace(/Ⅴ/g, 'V');
+                  const sameCourse = (left, right) => {
+                    const a = comparable(left);
+                    const b = comparable(right);
+                    return a === b || a.includes(b) || b.includes(a);
+                  };
+                  const clickName = element => compact(element.getAttribute('data-xy-click-pt-name') || '');
+                  const isCourseCard = element => (
+                    element.getAttribute('data-xy-click-pt') === 'enter-course' ||
+                    String(element.className || '').includes('aia_course_card')
+                  );
                   const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
                   const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
                   const isCandidate = element => {
                     if (!visible(element)) return false;
                     const text = readableText(element);
+                    const name = clickName(element);
+                    if (name && sameCourse(name, courseName) && isCourseCard(element)) return true;
                     if (!text || text.length < 4 || text.length > 900) return false;
                     if (navNoise(text)) return false;
                     const combined = [text, attrSummary(element), element.getAttribute('href') || '', element.href || ''].join(' ');
-                    return (text.includes(courseName) && courseContext(combined)) || /\\/mycourse\\/\\d{12,}/.test(combined);
+                    return (sameCourse(text, courseName) && courseContext(combined)) || /\\/mycourse\\/\\d{12,}/.test(combined);
                   };
                   const selectors = [
+                    '[data-xy-click-pt="enter-course"]',
+                    '[data-xy-click-pt-name]',
                     '.aia_course_card',
                     '[class*="course-card"]',
                     '[class*="courseCard"]',
@@ -702,18 +766,31 @@ def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
                   ];
                   const all = Array.from(new Set(selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))))
                     .filter(isCandidate);
-                  const cards = all.filter(element => !all.some(other => {
+                  const preferredCards = all.filter(element => isCourseCard(element) && (
+                    sameCourse(clickName(element), courseName) || sameCourse(readableText(element), courseName)
+                  ));
+                  const cards = (preferredCards.length ? preferredCards : all).filter(element => !all.some(other => {
                     if (other === element || !element.contains(other)) return false;
                     const text = readableText(other);
-                    return text.includes(courseName) && text.length >= 4 && text.length < readableText(element).length;
+                    const name = clickName(other);
+                    return (
+                      (sameCourse(name, courseName) || sameCourse(text, courseName)) &&
+                      text.length >= 4 &&
+                      text.length < readableText(element).length &&
+                      !isCourseCard(element)
+                    );
                   }));
-                  const card = cards.find(element => readableText(element).includes(courseName));
+                  const card = cards.find(element =>
+                    sameCourse(clickName(element), courseName) || sameCourse(readableText(element), courseName)
+                  );
                   if (!card) return false;
+                  const courseCard = card.closest('[data-xy-click-pt="enter-course"], .aia_course_card') || card;
                   const clickables = [
+                    courseCard,
                     card,
-                    ...Array.from(card.querySelectorAll('a[href],button,[role="button"],[onclick],[tabindex],[class*="course"],[class*="card"]')),
+                    ...Array.from(courseCard.querySelectorAll('a[href],button,[role="button"],[onclick],[tabindex],[class*="course"],[class*="card"]')),
                   ];
-                  let current = card.parentElement;
+                  let current = courseCard.parentElement;
                   for (let depth = 0; current && depth < 4; depth += 1) {
                     clickables.push(current);
                     current = current.parentElement;
@@ -723,8 +800,13 @@ def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
                     const text = readableText(element);
                     const signal = element.matches('a[href],button,[role="button"],[onclick],[tabindex]') ||
                       /course|card|item/i.test(String(element.className || ''));
-                    return signal && (text.includes(courseName) || card.contains(element) || element.contains(card));
-                  }) || card;
+                    return signal && (
+                      sameCourse(clickName(element), courseName) ||
+                      sameCourse(text, courseName) ||
+                      courseCard.contains(element) ||
+                      element.contains(courseCard)
+                    );
+                  }) || courseCard;
                   target.scrollIntoView({block: 'center', inline: 'center'});
                   target.click();
                   return true;
