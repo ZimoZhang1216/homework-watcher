@@ -188,6 +188,38 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_network_payload_accepts_course_like_id_name_objects(self) -> None:
+        payloads = [
+            {
+                "url": "https://nankai.ai-augmented.com/api/jx-web/list",
+                "body": """
+                {
+                  "data": [
+                    {
+                      "id": "6902425978165806721",
+                      "name": "大学物理学基础 II",
+                      "collegeName": "大学物理及实验",
+                      "semesterName": "2026年春",
+                      "teacherName": "张连众"
+                    }
+                  ]
+                }
+                """,
+            }
+        ]
+
+        candidates = raw_course_candidates_from_network_payloads(
+            payloads,
+            mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(extract_course_id_from_raw(candidates[0]), "6902425978165806721")
+        self.assertEqual(
+            extract_course_name_from_raw(candidates[0], course_id="6902425978165806721"),
+            "大学物理学基础 II",
+        )
+
     def test_course_name_from_card_summary_text(self) -> None:
         names = course_name_candidates(
             "定量化学分析 学院：化学学院 陈明星 152次 44人 2026年春 校内公开 教务开课",
@@ -196,7 +228,7 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
 
         self.assertIn("定量化学分析", names)
 
-    def test_xiaoya_config_defaults_to_known_course_scan(self) -> None:
+    def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
         config = parse_platform_config(
             "xiaoya",
             {
@@ -212,7 +244,7 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             },
         )
 
-        self.assertFalse(config.auto_discover_courses)
+        self.assertTrue(config.auto_discover_courses)
         self.assertEqual(config.mycourse_url, "https://nankai.ai-augmented.com/app/jx-web/mycourse")
         self.assertEqual(config.known_courses[0].source, "known")
 

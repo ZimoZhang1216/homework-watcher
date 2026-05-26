@@ -54,9 +54,22 @@ COURSE_URL_KEYS = (
     "taskurl",
     "task_url",
 )
+COURSE_CONTEXT_KEYS = (
+    "college",
+    "school",
+    "academy",
+    "department",
+    "teacher",
+    "term",
+    "semester",
+    "teaching",
+    "class",
+    "open",
+)
 MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 40
-MAX_CLICK_DISCOVERY_CANDIDATES = 24
+DOM_COURSE_WAIT_MS = 6000
+NETWORK_SETTLE_MS = 2000
 COURSE_ACTION_PHRASES = (
     "进入课程",
     "查看详情",
@@ -116,11 +129,19 @@ class XiaoyaCourseDiscoverer:
             return []
 
         self._emit(emit, f"[xiaoya-discover] page loaded url={sanitize_url_for_log(page.url)}")
-        raw_candidates = wait_for_xiaoya_course_candidates(page, timeout_ms=15000)
-        self._emit(emit, f"[xiaoya-discover] raw course candidates count={len(raw_candidates)}")
+        page.wait_for_timeout(NETWORK_SETTLE_MS)
         network_candidates = raw_course_candidates_from_network_payloads(network_payloads, mycourse_url=url)
         if network_candidates:
             self._emit(emit, f"[xiaoya-discover] network course candidates count={len(network_candidates)}")
+        state_candidates = evaluate_course_state_candidates(page)
+        if state_candidates:
+            self._emit(emit, f"[xiaoya-discover] state course candidates count={len(state_candidates)}")
+        if network_candidates or state_candidates:
+            dom_candidates = evaluate_course_candidates(page)
+        else:
+            dom_candidates = wait_for_xiaoya_course_candidates(page, timeout_ms=DOM_COURSE_WAIT_MS)
+        raw_candidates = dedupe_raw_course_candidates(dom_candidates + network_candidates + state_candidates)
+        self._emit(emit, f"[xiaoya-discover] raw course candidates count={len(raw_candidates)}")
 
         discovered: list[KnownCourseConfig] = []
         seen_course_ids: set[str] = set()
@@ -174,17 +195,7 @@ class XiaoyaCourseDiscoverer:
                     f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
                 )
 
-        append_candidates(raw_candidates + network_candidates)
-
-        click_candidates = discover_course_candidates_by_clicking(
-            page,
-            mycourse_url=url,
-            known_course_ids=seen_course_ids,
-            emit=emit,
-        )
-        if click_candidates:
-            self._emit(emit, f"[xiaoya-discover] click course candidates count={len(click_candidates)}")
-            append_candidates(click_candidates)
+        append_candidates(raw_candidates)
 
         if not discovered:
             dump_xiaoya_discovery_debug(page, self.settings, scan_id=scan_id, reason="no-courses")
@@ -404,15 +415,20 @@ def normalize_json_key(key: Any) -> str:
 
 
 def mapping_has_course_hint(mapping: dict[str, Any]) -> bool:
+    context_key_hits = 0
     for key, value in mapping.items():
         key_norm = normalize_json_key(key)
         value_text = stringify_json_scalar(value)
         if "course" in key_norm:
             return True
+        if any(marker in key_norm for marker in COURSE_CONTEXT_KEYS):
+            context_key_hits += 1
         if "/mycourse/" in value_text or "教务开课" in value_text or "校内公开" in value_text:
             return True
         if looks_like_course_card_text(value_text):
             return True
+    if context_key_hits >= 2 and extract_course_id(json.dumps(mapping, ensure_ascii=False)[:4000]):
+        return True
     return False
 
 
@@ -422,173 +438,11 @@ def same_origin_or_xiaoya(response_url: str, mycourse_url: str) -> bool:
     return not response_host or response_host == mycourse_host or response_host.endswith(".ai-augmented.com")
 
 
-def discover_course_candidates_by_clicking(
-    page: Page,
-    *,
-    mycourse_url: str,
-    known_course_ids: set[str],
-    emit: Callable[[str], None] | None,
-) -> list[dict[str, Any]]:
-    initial_candidates = mark_xiaoya_click_candidates(page)
-    if not initial_candidates or len(initial_candidates) <= len(known_course_ids):
-        return []
-
-    raw_candidates: list[dict[str, Any]] = []
-    expected_count = expected_course_count_from_mycourse_page(page)
-    click_count = min(len(initial_candidates), MAX_CLICK_DISCOVERY_CANDIDATES)
-    if expected_count:
-        remaining = max(0, expected_count - len(known_course_ids))
-        click_count = min(click_count, remaining + 2)
-    for index in range(click_count):
-        try:
-            if not is_mycourse_listing_url(page.url, mycourse_url):
-                return_to_mycourse_listing(page, mycourse_url)
-            click_candidates = mark_xiaoya_click_candidates(page)
-            if index >= len(click_candidates):
-                continue
-            click_candidate = click_candidates[index]
-            marker = str(click_candidate.get("marker") or "")
-            if not marker:
-                continue
-            before_url = page.url
-            locator = page.locator(f'[data-hw-xiaoya-click-index="{marker}"]').first
-            locator.scroll_into_view_if_needed(timeout=1000)
-            locator.click(timeout=1500)
-            course_id = wait_for_course_id_in_url(page, before_url=before_url, timeout_ms=1500)
-            if not course_id or course_id in known_course_ids:
-                continue
-            raw_candidates.append(
-                {
-                    "href": page.url,
-                    "absolute_href": page.url,
-                    "text": str(click_candidate.get("text") or ""),
-                    "attrs": "click-discovered",
-                    "ancestor_texts": [str(click_candidate.get("text") or "")],
-                    "ancestor_attrs": [],
-                    "title_texts": click_candidate.get("title_texts") or [],
-                }
-            )
-            known_course_ids.add(course_id)
-            if emit is not None:
-                emit(f"[xiaoya-discover] click candidate course_id={course_id} url={sanitize_url_for_log(page.url)}")
-            if expected_count and len(known_course_ids) >= expected_count:
-                break
-        except Exception as exc:  # noqa: BLE001 - one card must not block discovery.
-            if emit is not None:
-                emit(f"[xiaoya-discover] click skipped index={index + 1} type={type(exc).__name__}")
-        finally:
-            try:
-                if not is_mycourse_listing_url(page.url, mycourse_url):
-                    return_to_mycourse_listing(page, mycourse_url)
-            except Exception:
-                pass
-    return dedupe_raw_course_candidates(raw_candidates)
-
-
-def expected_course_count_from_mycourse_page(page: Page) -> int:
-    try:
-        text = str(page.evaluate("() => document.body ? document.body.innerText : ''"))
-    except Exception:
-        return 0
-    return expected_course_count_from_text(text)
-
-
 def expected_course_count_from_text(text: str) -> int:
     match = re.search(r"正在进行\s*[（(]\s*(?P<count>\d{1,3})\s*[）)]", text)
     if not match:
         return 0
     return int(match.group("count"))
-
-
-def return_to_mycourse_listing(page: Page, mycourse_url: str) -> None:
-    try:
-        page.go_back(wait_until="domcontentloaded", timeout=2500)
-        page.wait_for_timeout(300)
-    except Exception:
-        page.goto(mycourse_url, wait_until="domcontentloaded", timeout=3500)
-
-
-def is_mycourse_listing_url(current_url: str, mycourse_url: str) -> bool:
-    current = urlparse(current_url or "")
-    expected = urlparse(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL)
-    return current.netloc == expected.netloc and current.path.rstrip("/") == expected.path.rstrip("/")
-
-
-def mark_xiaoya_click_candidates(page: Page) -> list[dict[str, Any]]:
-    try:
-        raw = page.evaluate(
-            """
-            () => {
-              const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
-              const visible = element => {
-                const rect = element.getBoundingClientRect();
-                const style = window.getComputedStyle(element);
-                return rect.width >= 80 && rect.height >= 32
-                  && style.visibility !== 'hidden'
-                  && style.display !== 'none'
-                  && Number(style.opacity || 1) > 0;
-              };
-              const looksCourseCard = text => {
-                if (!text || text.length < 4 || text.length > 360) return false;
-                if (!/[\\u4e00-\\u9fff]/.test(text)) return false;
-                if (/我的课程.*收藏的课.*访问的课/.test(text)) return false;
-                if (/加入课程.*创建课程.*正在进行/.test(text)) return false;
-                return /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text);
-              };
-              const titleTexts = element => Array.from(
-                element.querySelectorAll('h1,h2,h3,h4,[class*="title"],[class*="Title"],[class*="name"],[class*="Name"],[title]')
-              )
-                .slice(0, 8)
-                .map(node => compact(node.innerText || node.textContent || node.getAttribute('title') || ''))
-                .filter(Boolean);
-              document.querySelectorAll('[data-hw-xiaoya-click-index]')
-                .forEach(element => element.removeAttribute('data-hw-xiaoya-click-index'));
-              const elements = Array.from(document.body.querySelectorAll(
-                'a,button,[role="button"],[onclick],article,li,section,div,[class*="card"],[class*="Card"],[class*="course"],[class*="Course"]'
-              ));
-              const targets = [];
-              const seenTargets = new Set();
-              for (const element of elements) {
-                if (!visible(element)) continue;
-                const text = compact(element.innerText || element.textContent || '');
-                if (!looksCourseCard(text)) continue;
-                const hasCourseChild = Array.from(element.children || []).some(child => {
-                  if (!visible(child)) return false;
-                  const childText = compact(child.innerText || child.textContent || '');
-                  return looksCourseCard(childText) && childText.length >= Math.min(text.length * 0.7, 180);
-                });
-                if (hasCourseChild) continue;
-                const target = element.closest('a,button,[role="button"],[onclick]') || element;
-                if (!visible(target) || seenTargets.has(target)) continue;
-                seenTargets.add(target);
-                const marker = String(targets.length);
-                target.setAttribute('data-hw-xiaoya-click-index', marker);
-                targets.push({
-                  marker,
-                  text: text.slice(0, 800),
-                  title_texts: titleTexts(element),
-                });
-              }
-              return targets.slice(0, 80);
-            }
-            """
-        )
-    except Exception:
-        return []
-    if not isinstance(raw, list):
-        return []
-    return [item for item in raw if isinstance(item, dict)]
-
-
-def wait_for_course_id_in_url(page: Page, *, before_url: str, timeout_ms: int) -> str:
-    deadline = monotonic_time.monotonic() + max(timeout_ms, 500) / 1000
-    while monotonic_time.monotonic() < deadline:
-        current_url = str(getattr(page, "url", "") or "")
-        course_id = extract_course_id(current_url)
-        if course_id and current_url != before_url:
-            return course_id
-        page.wait_for_timeout(250)
-    return extract_course_id(str(getattr(page, "url", "") or ""))
 
 
 def evaluate_course_candidates(page: Page) -> list[dict[str, Any]]:
@@ -665,6 +519,109 @@ def evaluate_course_candidates(page: Page) -> list[dict[str, Any]]:
                     title_texts: ancestors.flatMap(item => item.title_texts).slice(0, 30),
                   };
                 });
+            }
+            """
+        )
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def evaluate_course_state_candidates(page: Page) -> list[dict[str, Any]]:
+    try:
+        raw = page.evaluate(
+            """
+            () => {
+              const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+              const sensitiveKey = key => /token|authorization|auth|password|secret|session|cookie/i.test(String(key || ''));
+              const courseId = value => {
+                const match = String(value || '').match(/\\b\\d{12,}\\b/);
+                return match ? match[0] : '';
+              };
+              const looksCourseName = value => {
+                const text = compact(value);
+                if (!text || text.length < 2 || text.length > 100) return false;
+                if (!/[\\u4e00-\\u9fff]/.test(text)) return false;
+                if (/登录|密码|验证码|用户协议|隐私政策|收藏的课|访问的课|加入课程|创建课程/.test(text)) return false;
+                return true;
+              };
+              const looksCourseContext = value => /学院[:：]|校内公开|教务开课|202\\d年|课程|course|mycourse|resource|teaching/i.test(value || '');
+              const candidates = [];
+              const seen = new WeakSet();
+              let visited = 0;
+              const pushCandidate = (id, scalars) => {
+                if (!id) return;
+                const entries = Object.entries(scalars).filter(([key]) => !sensitiveKey(key));
+                const nameEntry = entries.find(([key, value]) => {
+                  const keyText = String(key).toLowerCase();
+                  return /course.*name|course.*title|name|title/.test(keyText) && looksCourseName(value);
+                }) || entries.find(([, value]) => looksCourseName(value));
+                const textParts = entries
+                  .map(([, value]) => compact(value))
+                  .filter(value => looksCourseName(value) || /学院[:：]|校内公开|教务开课|202\\d年/.test(value))
+                  .slice(0, 8);
+                const text = compact([nameEntry ? nameEntry[1] : '', ...textParts].filter(Boolean).join(' '));
+                if (!text) return;
+                candidates.push({
+                  href: '',
+                  absolute_href: '',
+                  text: text.slice(0, 800),
+                  attrs: `state course_id=${id}`,
+                  ancestor_texts: textParts.slice(0, 4),
+                  ancestor_attrs: [],
+                  title_texts: nameEntry ? [compact(nameEntry[1])] : textParts.slice(0, 2),
+                });
+              };
+              const walk = (value, depth = 0) => {
+                if (!value || typeof value !== 'object' || depth > 5 || visited > 6000) return;
+                if (seen.has(value)) return;
+                seen.add(value);
+                visited += 1;
+                const scalars = {};
+                let combined = '';
+                for (const key of Object.keys(value).slice(0, 80)) {
+                  if (sensitiveKey(key)) continue;
+                  let child;
+                  try { child = value[key]; } catch { continue; }
+                  if (child == null) continue;
+                  if (typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean') {
+                    const text = compact(child);
+                    if (!text || text.length > 500) continue;
+                    scalars[key] = text;
+                    combined += ` ${key}=${text}`;
+                  }
+                }
+                const id = courseId(combined);
+                if (id && (looksCourseContext(combined) || Object.keys(scalars).some(key => /course|teaching|class|semester|term|college|school/i.test(key)))) {
+                  pushCandidate(id, scalars);
+                }
+                for (const key of Object.keys(value).slice(0, 80)) {
+                  if (sensitiveKey(key)) continue;
+                  let child;
+                  try { child = value[key]; } catch { continue; }
+                  if (child && typeof child === 'object') walk(child, depth + 1);
+                }
+              };
+              const roots = [];
+              for (const element of Array.from(document.querySelectorAll('#app, [class*="course"], [class*="Course"], article, li, section, div')).slice(0, 260)) {
+                for (const key of Object.keys(element)) {
+                  if (/^__vue|^__react|reactFiber|reactProps|vue/i.test(key)) {
+                    try { roots.push(element[key]); } catch {}
+                  }
+                }
+              }
+              for (const key of Object.keys(window).slice(0, 3000)) {
+                if (/^__INITIAL|^__NUXT|^__NEXT|^__APOLLO|store|pinia|redux|app/i.test(key) && !sensitiveKey(key)) {
+                  try {
+                    const value = window[key];
+                    if (value && typeof value === 'object') roots.push(value);
+                  } catch {}
+                }
+              }
+              for (const root of roots.slice(0, 300)) walk(root);
+              return candidates.slice(0, 200);
             }
             """
         )
