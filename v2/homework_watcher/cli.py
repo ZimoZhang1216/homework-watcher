@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser.set_defaults(handler=cmd_scan)
 
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
+    login_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     login_xiaoya_parser.set_defaults(handler=cmd_login_xiaoya)
 
     discover_xiaoya_parser = subparsers.add_parser(
@@ -93,8 +94,8 @@ def cmd_scan(args) -> int:
     return 0 if not result.errors else 1
 
 
-def cmd_login_xiaoya(_args) -> int:
-    login_xiaoya(load_settings())
+def cmd_login_xiaoya(args) -> int:
+    login_xiaoya(load_settings(), user_key=args.user)
     return 0
 
 

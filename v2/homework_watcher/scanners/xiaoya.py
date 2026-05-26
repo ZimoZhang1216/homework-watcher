@@ -808,9 +808,9 @@ def click_next_page(page: Page) -> bool:
     )
 
 
-def login_xiaoya(settings: Settings | None = None) -> None:
+def login_xiaoya(settings: Settings | None = None, *, user_key: str = "default") -> None:
     active_settings = settings or load_settings()
-    profile_dir = profile_dir_for_user_platform(active_settings, "default", "xiaoya")
+    profile_dir = profile_dir_for_user_platform(active_settings, user_key, "xiaoya")
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -822,7 +822,8 @@ def login_xiaoya(settings: Settings | None = None) -> None:
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto("https://nankai.ai-augmented.com/app/jx-web/mycourse", wait_until="domcontentloaded")
-            print("已打开小雅登录页。请在浏览器中手动登录；程序不会读取、保存或提交你的密码。")
+            print(f"已打开小雅登录页，用户={user_key}，登录态目录={profile_dir}。")
+            print("请在浏览器中手动登录；程序不会读取、保存或提交你的密码。")
             input("登录完成后按回车关闭浏览器并保存本地登录态。")
         finally:
             context.close()
