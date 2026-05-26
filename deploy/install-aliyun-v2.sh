@@ -107,7 +107,7 @@ GIT_COMMIT="$(git -C "$SRC_DIR" rev-parse --short HEAD)"
 APP_VERSION="$(
   sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$SRC_DIR/v2/homework_watcher/__init__.py" | head -n 1
 )"
-: "${APP_VERSION:=V2.5}"
+: "${APP_VERSION:=V2.6}"
 
 log "stopping old web service if present"
 systemctl stop homework-watcher-web >/dev/null 2>&1 || true

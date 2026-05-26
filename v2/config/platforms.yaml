@@ -5,7 +5,7 @@ changjiang-yuketang:
 xiaoya:
   enabled: true
   base_url: "https://nankai.ai-augmented.com"
-  auto_discover_courses: true
+  auto_discover_courses: false
   mycourse_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse"
   known_courses:
     - course: "结构化学"

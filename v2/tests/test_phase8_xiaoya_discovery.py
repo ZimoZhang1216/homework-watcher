@@ -196,7 +196,7 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
 
         self.assertIn("定量化学分析", names)
 
-    def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
+    def test_xiaoya_config_defaults_to_known_course_scan(self) -> None:
         config = parse_platform_config(
             "xiaoya",
             {
@@ -212,9 +212,21 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(config.auto_discover_courses)
+        self.assertFalse(config.auto_discover_courses)
         self.assertEqual(config.mycourse_url, "https://nankai.ai-augmented.com/app/jx-web/mycourse")
         self.assertEqual(config.known_courses[0].source, "known")
+
+    def test_xiaoya_config_allows_explicit_auto_discover(self) -> None:
+        config = parse_platform_config(
+            "xiaoya",
+            {
+                "enabled": True,
+                "base_url": "https://nankai.ai-augmented.com",
+                "auto_discover_courses": True,
+            },
+        )
+
+        self.assertTrue(config.auto_discover_courses)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,6 @@ def parse_platform_config(name: str, raw: dict[str, Any]) -> PlatformConfig:
         enabled=bool(raw.get("enabled", False)),
         base_url=base_url,
         known_courses=courses,
-        auto_discover_courses=bool(raw.get("auto_discover_courses", name == "xiaoya")),
+        auto_discover_courses=bool(raw.get("auto_discover_courses", False)),
         mycourse_url=str(raw.get("mycourse_url") or default_mycourse_url).strip(),
     )
