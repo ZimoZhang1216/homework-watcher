@@ -13,6 +13,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     extract_course_name_from_raw,
     expected_course_count_from_text,
     merge_xiaoya_courses,
+    normalize_known_xiaoya_course,
     raw_course_candidates_from_network_payloads,
     should_resolve_course_cards_by_click,
 )
@@ -74,6 +75,20 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
         self.assertEqual([course.course for course in result.courses], ["结构化学", "高等数学（B类）II"])
         self.assertEqual(result.courses[0].source, "known")
         self.assertEqual(result.courses[1].source, "discovered")
+
+    def test_known_course_url_is_normalized_to_task_url(self) -> None:
+        course = normalize_known_xiaoya_course(
+            KnownCourseConfig(
+                course="结构化学",
+                course_id="6902426124991620398",
+                task_url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398",
+            )
+        )
+
+        self.assertEqual(
+            course.task_url,
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+        )
 
     def test_extract_course_id_from_data_attribute(self) -> None:
         raw = {

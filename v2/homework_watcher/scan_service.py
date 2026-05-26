@@ -147,12 +147,26 @@ class ScanService:
 
         normalized = list(all_candidates)
         filtered = [candidate for candidate in normalized if not is_fake_course_summary(candidate)]
+        filtered_out_count = len(normalized) - len(filtered)
         self._log(
             scan_id,
             "before db upsert count=%s titles=%s",
             len(filtered),
             _safe_titles(filtered),
         )
+        for candidate in filtered:
+            self._log(
+                scan_id,
+                "[db] candidate platform=%s course=%s title=%s status=%s due_at=%s is_todo=%s",
+                candidate.platform,
+                candidate.course,
+                candidate.title,
+                candidate.status_normalized,
+                candidate.due_at.isoformat(timespec="seconds"),
+                str(candidate.is_todo).lower(),
+            )
+        if filtered_out_count:
+            self._log(scan_id, "[db] skipped fake_course_summary=%s", filtered_out_count)
 
         with self.session_factory() as session:
             stats = upsert_assignments(session, filtered, owner_key=self.user_key)
@@ -170,7 +184,24 @@ class ScanService:
             stats.updated,
             stats.skipped,
         )
+        self._log(
+            scan_id,
+            "[db] inserted=%s updated=%s skipped=%s",
+            stats.inserted,
+            stats.updated,
+            stats.skipped + filtered_out_count,
+        )
         self._log(scan_id, "final todo count=%s titles=%s", len(todos), _safe_dict_titles(todos))
+        self._log(scan_id, "[todo] count=%s", len(todos))
+        for item in todos:
+            self._log(
+                scan_id,
+                "[todo] item course=%s title=%s status=%s due_at=%s",
+                item.get("course"),
+                item.get("title"),
+                item.get("status_normalized"),
+                item.get("due_at"),
+            )
 
         result = ScanResult(
             scan_id=scan_id,
@@ -222,11 +253,15 @@ def scanner_source_path(scanner_cls) -> str:
 def is_fake_course_summary(candidate: AssignmentCandidate) -> bool:
     if candidate.platform != "小雅":
         return False
-    if candidate.course.strip() != candidate.title.strip():
+    if compact_text(candidate.course) != compact_text(candidate.title):
         return False
     if candidate.status_normalized != "unknown":
         return False
-    return "mycourse" in candidate.url or not candidate.url
+    return True
+
+
+def compact_text(value: str) -> str:
+    return "".join(str(value or "").split())
 
 
 def _safe_titles(candidates: Iterable[AssignmentCandidate]) -> str:

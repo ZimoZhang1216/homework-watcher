@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 
 from .config_loader import load_platform_configs
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
@@ -42,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     scan_xiaoya_auto_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     scan_xiaoya_auto_parser.set_defaults(handler=cmd_scan_xiaoya_auto)
+
+    diagnose_xiaoya_parser = subparsers.add_parser(
+        "diagnose-xiaoya", help="诊断小雅课程发现、任务抓取、入库和待办"
+    )
+    diagnose_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
+    diagnose_xiaoya_parser.set_defaults(handler=cmd_diagnose_xiaoya)
 
     args = parser.parse_args(argv)
     if not hasattr(args, "handler"):
@@ -95,6 +102,10 @@ def cmd_scan_xiaoya_auto(_args) -> int:
     return run_xiaoya_scan_diagnostic(_args)
 
 
+def cmd_diagnose_xiaoya(args) -> int:
+    return run_xiaoya_scan_diagnostic(args)
+
+
 def cmd_discover_xiaoya_courses(args) -> int:
     settings = load_settings()
     config = load_platform_configs(settings.config_path).get("xiaoya")
@@ -118,7 +129,11 @@ def cmd_discover_xiaoya_courses(args) -> int:
 
 def run_xiaoya_scan_diagnostic(args) -> int:
     settings = load_settings()
-    result = ScanService(settings, user_key=args.user).run_scan(platforms=["xiaoya"])
+    service = ScanService(settings, user_key=args.user)
+    config = service.configs.get("xiaoya")
+    if config is not None:
+        service.configs["xiaoya"] = replace(config, enabled=True, auto_discover_courses=True)
+    result = service.run_scan(platforms=["xiaoya"])
     init_db(settings)
     session_factory = create_session_factory(settings)
     with session_factory() as session:
@@ -127,11 +142,17 @@ def run_xiaoya_scan_diagnostic(args) -> int:
 
     xiaoya_assignments = [item for item in assignments if item["platform"] == "小雅"]
     xiaoya_todos = [item for item in todos if item["platform"] == "小雅"]
+    diagnosis = diagnose_xiaoya_result(
+        result=result,
+        xiaoya_assignments=xiaoya_assignments,
+        xiaoya_todos=xiaoya_todos,
+    )
     output = {
         "version": settings.app_version,
         "git_commit": git_commit(),
         "scanner_file": scanner_source_path(XiaoyaScanner),
         "debug_dump_dir": str(settings.debug_dump_dir),
+        "diagnosis": diagnosis,
         "xiaoya_summary": result.platform_summaries.get("xiaoya", {}),
         "scan": result.to_dict(),
         "xiaoya_assignment_count": len(xiaoya_assignments),
@@ -140,7 +161,54 @@ def run_xiaoya_scan_diagnostic(args) -> int:
         "xiaoya_todos": xiaoya_todos,
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
-    return 0 if not result.errors else 1
+    print(diagnosis)
+    return 0 if diagnosis == "PASS" else 1
+
+
+def diagnose_xiaoya_result(
+    *,
+    result,
+    xiaoya_assignments: list[dict[str, object]],
+    xiaoya_todos: list[dict[str, object]],
+) -> str:
+    summary = result.platform_summaries.get("xiaoya", {})
+    merged_count = int(summary.get("merged_courses_count") or 0)
+    scanned_count = int(summary.get("scanned_courses_count") or 0)
+    failed_count = int(summary.get("failed_courses_count") or 0)
+    parsed_count = int(summary.get("parsed_assignments_count") or 0)
+    if result.errors and not summary:
+        return "FAIL_AT_PAGE_LOAD"
+    if merged_count == 0:
+        return "FAIL_AT_DISCOVERY"
+    if scanned_count == 0 and failed_count:
+        return "FAIL_AT_PAGE_LOAD"
+    if parsed_count == 0:
+        return "FAIL_AT_PARSE"
+    if not xiaoya_assignments or any(is_xiaoya_fake_summary_row(item) for item in xiaoya_assignments):
+        return "FAIL_AT_DB"
+    if not xiaoya_todos:
+        return "FAIL_AT_TODO"
+    if any(not is_valid_todo_row(item) or is_xiaoya_fake_summary_row(item) for item in xiaoya_todos):
+        return "FAIL_AT_WEB"
+    if result.errors:
+        return "FAIL_AT_PAGE_LOAD"
+    return "PASS"
+
+
+def is_xiaoya_fake_summary_row(item: dict[str, object]) -> bool:
+    return (
+        item.get("platform") == "小雅"
+        and compact_text(str(item.get("course") or "")) == compact_text(str(item.get("title") or ""))
+        and item.get("status_normalized") == "unknown"
+    )
+
+
+def is_valid_todo_row(item: dict[str, object]) -> bool:
+    return item.get("status_normalized") in {"in_progress", "pending"}
+
+
+def compact_text(value: str) -> str:
+    return "".join(str(value or "").split())
 
 
 def print_course_table(rows: list[dict[str, str]]) -> None:

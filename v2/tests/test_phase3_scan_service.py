@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from homework_watcher.candidates import AssignmentCandidate
-from homework_watcher.database import create_session_factory, init_db, list_todos
+from homework_watcher.database import create_session_factory, init_db, list_assignments, list_todos
 from homework_watcher.scan_progress import ScanCancelled
 from homework_watcher.scan_service import ScanService
 from homework_watcher.scanners.base import ScannerContext
@@ -88,6 +88,50 @@ class Phase3ScanServiceTests(unittest.TestCase):
                 [(item["platform"], item["course"], item["title"]) for item in result.todos],
                 [("小雅", "结构化学", "作业-08")],
             )
+
+    def test_xiaoya_fake_course_summary_is_filtered_before_db(self) -> None:
+        class StubXiaoyaScanner:
+            platform_key = "xiaoya"
+
+            def scan(self, _context: ScannerContext) -> list[AssignmentCandidate]:
+                return [
+                    AssignmentCandidate(
+                        platform="小雅",
+                        course="结构化学",
+                        title="结构化学",
+                        status_raw="未知",
+                        due_at=datetime(2026, 7, 31, 0, 0, 0),
+                        url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+                        source_key="xiaoya:structure:summary",
+                    ),
+                    AssignmentCandidate(
+                        platform="小雅",
+                        course="结构化学",
+                        title="作业-08",
+                        status_raw="进行中",
+                        due_at=datetime(2026, 5, 22, 23, 59, 59),
+                        url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+                        source_key="xiaoya:structure:homework-08",
+                    ),
+                ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = service_settings(tmpdir)
+            result = ScanService(settings, scanners=[StubXiaoyaScanner()]).run_scan(platforms=["xiaoya"])
+
+            self.assertEqual(result.filtered_count, 1)
+            self.assertEqual(result.upsert_stats.inserted, 1)
+            self.assertEqual([item["title"] for item in result.todos], ["作业-08"])
+
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+            with session_factory() as session:
+                self.assertEqual([item.title for item in list_assignments(session)], ["作业-08"])
+
+            log_text = (Path(tmpdir) / "logs" / "scan.log").read_text(encoding="utf-8")
+            self.assertIn("[db] candidate platform=小雅 course=结构化学 title=作业-08", log_text)
+            self.assertIn("[db] inserted=1 updated=0 skipped=1", log_text)
+            self.assertIn("[todo] item course=结构化学 title=作业-08 status=in_progress", log_text)
 
     def test_scan_cancelled_propagates_out_of_service(self) -> None:
         class CancellableScanner:

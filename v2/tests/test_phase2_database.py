@@ -109,6 +109,29 @@ class Phase2DatabaseTests(unittest.TestCase):
                 self.assertEqual([item.owner_key for item in list_todos(session, owner_key="bob")], ["bob"])
                 self.assertEqual(list_todos(session, owner_key="carol"), [])
 
+    def test_todo_query_requires_current_status_whitelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "homework.sqlite3"
+            settings = test_settings(f"sqlite:///{db_path}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+            candidate = AssignmentCandidate(
+                platform="小雅",
+                course="结构化学",
+                title="结构化学",
+                status_raw="未知",
+                due_at=datetime(2026, 7, 31, 0, 0),
+                url="https://example.test/task",
+            )
+            with session_factory() as session:
+                upsert_assignments(session, [candidate])
+            engine = create_engine(f"sqlite:///{db_path}", future=True)
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE assignments SET is_todo = 1 WHERE title = '结构化学'"))
+
+            with session_factory() as session:
+                self.assertEqual(list_todos(session), [])
+
     def test_old_assignment_table_migrates_to_default_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "homework.sqlite3"

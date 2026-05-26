@@ -52,6 +52,7 @@ class Phase4XiaoyaParserTests(unittest.TestCase):
         self.assertTrue(by_title["作业-08"].is_todo)
         self.assertEqual(by_title["实习1 分子对称性"].status_normalized, "completed")
         self.assertFalse(by_title["实习1 分子对称性"].is_todo)
+        self.assertTrue(by_title["实习2 点阵理论"].is_todo)
         self.assertEqual(by_title["实习2 点阵理论"].due_at.isoformat(sep=" "), "2026-05-22 23:59:59")
 
     def test_filter_course_summary_fake_assignment(self) -> None:

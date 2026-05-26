@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .candidates import AssignmentCandidate
 from .models import Assignment, Base
 from .settings import Settings, load_settings
+from .status import TODO_STATUSES
 
 
 DEFAULT_OWNER_KEY = "default"
@@ -162,7 +163,11 @@ def list_todos(session: Session, *, owner_key: str = DEFAULT_OWNER_KEY) -> list[
     return list(
         session.scalars(
             select(Assignment)
-            .where(Assignment.owner_key == owner_key, Assignment.is_todo.is_(True))
+            .where(
+                Assignment.owner_key == owner_key,
+                Assignment.is_todo.is_(True),
+                Assignment.status_normalized.in_(TODO_STATUSES),
+            )
             .order_by(Assignment.due_at.asc(), Assignment.platform.asc(), Assignment.course.asc())
         )
     )

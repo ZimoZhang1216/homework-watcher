@@ -68,6 +68,8 @@ COURSE_CONTEXT_KEYS = (
 )
 MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 40
+DISCOVERY_LOAD_TIMEOUT_MS = 15000
+DISCOVERY_EXTRACT_TIMEOUT_MS = 15000
 DOM_COURSE_WAIT_MS = 6000
 NETWORK_SETTLE_MS = 2000
 MAX_COURSE_LIST_PAGES = 10
@@ -124,14 +126,15 @@ class XiaoyaCourseDiscoverer:
 
         page.on("response", collect_response)
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.goto(url, wait_until="domcontentloaded", timeout=DISCOVERY_LOAD_TIMEOUT_MS)
         except PlaywrightTimeoutError:
             self._emit(emit, "[xiaoya-discover] timeout loading mycourse page")
             dump_xiaoya_discovery_debug(page, self.settings, scan_id=scan_id, reason="load-timeout")
             return []
 
-        self._emit(emit, f"[xiaoya-discover] page loaded url={sanitize_url_for_log(page.url)}")
-        page.wait_for_timeout(NETWORK_SETTLE_MS)
+        self._emit(emit, f"[xiaoya-discover] loaded current_url={sanitize_url_for_log(page.url)}")
+        extract_deadline = monotonic_time.monotonic() + DISCOVERY_EXTRACT_TIMEOUT_MS / 1000
+        page.wait_for_timeout(min(NETWORK_SETTLE_MS, remaining_deadline_ms(extract_deadline)))
         network_candidates = raw_course_candidates_from_network_payloads(network_payloads, mycourse_url=url)
         if network_candidates:
             self._emit(emit, f"[xiaoya-discover] network course candidates count={len(network_candidates)}")
@@ -141,9 +144,12 @@ class XiaoyaCourseDiscoverer:
         if network_candidates or state_candidates:
             dom_candidates = evaluate_course_candidates(page)
         else:
-            dom_candidates = wait_for_xiaoya_course_candidates(page, timeout_ms=DOM_COURSE_WAIT_MS)
+            dom_candidates = wait_for_xiaoya_course_candidates(
+                page,
+                timeout_ms=min(DOM_COURSE_WAIT_MS, remaining_deadline_ms(extract_deadline)),
+            )
         raw_candidates = dedupe_raw_course_candidates(dom_candidates + network_candidates + state_candidates)
-        self._emit(emit, f"[xiaoya-discover] raw course candidates count={len(raw_candidates)}")
+        self._emit(emit, f"[xiaoya-discover] raw_candidate_count={len(raw_candidates)}")
 
         discovered: list[KnownCourseConfig] = []
         seen_course_ids: set[str] = set()
@@ -193,7 +199,7 @@ class XiaoyaCourseDiscoverer:
                 seen_course_ids.add(course_id)
                 self._emit(
                     emit,
-                    f"[xiaoya-discover] candidate course={sanitize_log_value(course)} "
+                    f"[xiaoya-discover] course={sanitize_log_value(course)} "
                     f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
                 )
 
@@ -206,12 +212,13 @@ class XiaoyaCourseDiscoverer:
             raw_candidates,
             discovered_count=len(discovered),
             expected_count=expected_count,
-        ):
+        ) and remaining_deadline_ms(extract_deadline):
             click_resolved_candidates = resolve_course_cards_by_clicking(
                 page,
                 mycourse_url=url,
                 existing_course_ids=seen_course_ids,
                 seed_candidates=raw_candidates,
+                deadline=extract_deadline,
                 emit=emit,
             )
             if click_resolved_candidates:
@@ -220,15 +227,37 @@ class XiaoyaCourseDiscoverer:
                     f"[xiaoya-discover] click resolved course candidates count={len(click_resolved_candidates)}",
                 )
                 append_candidates(click_resolved_candidates)
+        elif should_resolve_course_cards_by_click(
+            raw_candidates,
+            discovered_count=len(discovered),
+            expected_count=expected_count,
+        ):
+            self._emit(emit, "[xiaoya-discover] extraction timeout before click fallback")
 
         if not discovered:
             dump_xiaoya_discovery_debug(page, self.settings, scan_id=scan_id, reason="no-courses")
-        self._emit(emit, f"[xiaoya-discover] discovered count={len(discovered)}")
+        self._emit(emit, f"[xiaoya-discover] discovered_count={len(discovered)}")
         return discovered
 
     def _emit(self, emit: Callable[[str], None] | None, message: str) -> None:
         if emit is not None:
             emit(message)
+
+
+def discover_xiaoya_courses(
+    page: Page,
+    *,
+    settings: Settings,
+    mycourse_url: str = XIAOYA_DEFAULT_MYCOURSE_URL,
+    scan_id: str = "manual",
+    emit: Callable[[str], None] | None = None,
+) -> list[KnownCourseConfig]:
+    return XiaoyaCourseDiscoverer(settings).discover(
+        page,
+        mycourse_url=mycourse_url,
+        scan_id=scan_id,
+        emit=emit,
+    )
 
 
 def merge_xiaoya_courses(
@@ -243,7 +272,7 @@ def merge_xiaoya_courses(
     duplicates = 0
 
     for course in known_courses:
-        normalized = replace(course, source=course.source or "known")
+        normalized = normalize_known_xiaoya_course(course)
         courses.append(normalized)
         if normalized.course_id:
             seen_ids.add(normalized.course_id)
@@ -261,7 +290,7 @@ def merge_xiaoya_courses(
             if emit is not None:
                 emit(f"[xiaoya-discover] duplicate course skipped course={sanitize_log_value(course.course)}")
             continue
-        normalized = replace(course, source=course.source or "discovered")
+        normalized = normalize_discovered_xiaoya_course(course)
         courses.append(normalized)
         if normalized.course_id:
             seen_ids.add(normalized.course_id)
@@ -273,6 +302,32 @@ def merge_xiaoya_courses(
         discovered_count=len(discovered_courses),
         duplicates_count=duplicates,
     )
+
+
+def normalize_known_xiaoya_course(course: KnownCourseConfig) -> KnownCourseConfig:
+    normalized = replace(course, source=course.source or "known")
+    if normalized.course_id and "/task" not in normalized.task_url:
+        normalized = replace(
+            normalized,
+            task_url=build_xiaoya_task_url(XIAOYA_DEFAULT_MYCOURSE_URL, normalized.course_id, href=normalized.task_url),
+        )
+    return normalized
+
+
+def normalize_discovered_xiaoya_course(course: KnownCourseConfig) -> KnownCourseConfig:
+    source = course.source or "discovered"
+    if course.course_id:
+        return KnownCourseConfig(
+            course=course.course,
+            course_id=course.course_id,
+            task_url=build_xiaoya_task_url(
+                XIAOYA_DEFAULT_MYCOURSE_URL,
+                course.course_id,
+                href=course.task_url,
+            ),
+            source=source,
+        )
+    return replace(course, source=source)
 
 
 def xiaoya_course_to_dict(course: KnownCourseConfig) -> dict[str, str]:
@@ -295,6 +350,12 @@ def wait_for_xiaoya_course_candidates(page: Page, *, timeout_ms: int) -> list[di
             return last_candidates
         page.wait_for_timeout(500)
     return last_candidates
+
+
+def remaining_deadline_ms(deadline: float | None) -> int:
+    if deadline is None:
+        return DISCOVERY_EXTRACT_TIMEOUT_MS
+    return max(0, int((deadline - monotonic_time.monotonic()) * 1000))
 
 
 def should_resolve_course_cards_by_click(
@@ -321,6 +382,7 @@ def resolve_course_cards_by_clicking(
     mycourse_url: str,
     existing_course_ids: set[str],
     seed_candidates: list[dict[str, Any]] | None = None,
+    deadline: float | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
@@ -329,7 +391,10 @@ def resolve_course_cards_by_clicking(
     seen_page_keys: set[str] = set()
 
     for list_page_no in range(1, MAX_COURSE_LIST_PAGES + 1):
-        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+        if deadline is not None and remaining_deadline_ms(deadline) <= 0:
+            emit_discovery(emit, "[xiaoya-discover] click fallback timeout")
+            break
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
             emit_discovery(emit, f"[xiaoya-discover] click fallback unable to open list page={list_page_no}")
             break
 
@@ -387,7 +452,7 @@ def resolve_course_cards_by_clicking(
                 f"[xiaoya-discover] resolving card by click page={list_page_no} "
                 f"course={sanitize_log_value(course_name)}",
             )
-            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
                 page_available = False
                 break
             if not click_xiaoya_course_card(page, course_name):
@@ -396,7 +461,10 @@ def resolve_course_cards_by_clicking(
                     f"[xiaoya-discover] click target not found course={sanitize_log_value(course_name)}",
                 )
                 continue
-            course_id = wait_for_course_id_after_click(page)
+            course_id = wait_for_course_id_after_click(
+                page,
+                timeout_ms=min(8000, remaining_deadline_ms(deadline)) if deadline is not None else 8000,
+            )
             if not course_id:
                 emit_discovery(
                     emit,
@@ -427,7 +495,7 @@ def resolve_course_cards_by_clicking(
 
         if not page_available:
             break
-        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no):
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
             break
         if not click_next_xiaoya_course_list_page(page):
             break
@@ -435,11 +503,22 @@ def resolve_course_cards_by_clicking(
     return dedupe_raw_course_candidates(resolved)
 
 
-def open_xiaoya_course_list_page(page: Page, mycourse_url: str, *, page_no: int) -> bool:
+def open_xiaoya_course_list_page(
+    page: Page,
+    mycourse_url: str,
+    *,
+    page_no: int,
+    deadline: float | None = None,
+) -> bool:
     try:
-        page.goto(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(COURSE_LIST_PAGE_WAIT_MS)
+        timeout_ms = DISCOVERY_LOAD_TIMEOUT_MS
+        if deadline is not None:
+            timeout_ms = min(timeout_ms, max(1000, remaining_deadline_ms(deadline)))
+        page.goto(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(min(COURSE_LIST_PAGE_WAIT_MS, remaining_deadline_ms(deadline)))
         for _ in range(1, page_no):
+            if deadline is not None and remaining_deadline_ms(deadline) <= 0:
+                return False
             if not click_next_xiaoya_course_list_page(page):
                 return False
         return True

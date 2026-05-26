@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time as monotonic_time
+from dataclasses import replace
 from datetime import datetime, time
 from pathlib import Path
 from typing import Callable
@@ -13,6 +14,8 @@ from homework_watcher.remote_login import profile_dir_for_user_platform
 from homework_watcher.scanners.xiaoya_discovery import (
     XIAOYA_DEFAULT_MYCOURSE_URL,
     XiaoyaCourseDiscoverer,
+    build_xiaoya_task_url,
+    merge_xiaoya_courses,
 )
 from homework_watcher.settings import Settings, load_settings
 from homework_watcher.status import normalize_status
@@ -270,6 +273,7 @@ class XiaoyaScanner:
         config = context.platform_config
         summary = {
             "platform_label": XIAOYA_PLATFORM_LABEL,
+            "known_courses_count": len(config.known_courses) if config is not None else 0,
             "discovered_courses_count": 0,
             "merged_courses_count": 0,
             "scanned_courses_count": 0,
@@ -283,8 +287,8 @@ class XiaoyaScanner:
         if config is None or not config.enabled:
             context.emit(5, "小雅：未启用，跳过")
             return []
-        if not config.auto_discover_courses:
-            context.emit(5, "小雅：未开启自动发现，跳过")
+        if not config.known_courses and not config.auto_discover_courses:
+            context.emit(5, "小雅：没有可扫描课程且未开启自动发现，跳过")
             return []
 
         profile_dir = self.profile_dir_for_user(context.user_key)
@@ -315,27 +319,35 @@ class XiaoyaScanner:
                             f"[xiaoya-discover] failed type={type(exc).__name__} message={exc}",
                         )
 
+                merge = merge_xiaoya_courses(
+                    config.known_courses,
+                    discovered_courses,
+                    emit=lambda message: context.emit(13, message),
+                )
                 summary.update(
                     {
-                        "discovered_courses_count": len(discovered_courses),
-                        "merged_courses_count": len(discovered_courses),
+                        "known_courses_count": merge.known_count,
+                        "discovered_courses_count": merge.discovered_count,
+                        "merged_courses_count": len(merge.courses),
+                        "duplicates_count": merge.duplicates_count,
                     }
                 )
-                context.emit(
-                    13,
-                    "[xiaoya-discover] using discovered courses "
-                    f"count={len(discovered_courses)} discovered={len(discovered_courses)}",
+                emit_xiaoya_merge_log(
+                    merge.courses,
+                    known_count=merge.known_count,
+                    discovered_count=merge.discovered_count,
+                    emit=lambda message: context.emit(13, message),
                 )
-                if not discovered_courses:
+                if not merge.courses:
                     context.emit(15, "小雅：没有可扫描课程，跳过")
                     return []
 
-                for index, course in enumerate(discovered_courses, start=1):
-                    percent = 15 + int(index / max(len(discovered_courses), 1) * 70)
+                for index, course in enumerate(merge.courses, start=1):
+                    percent = 15 + int(index / max(len(merge.courses), 1) * 70)
                     context.emit(
                         percent,
-                        f"[xiaoya-task] start source={course.source} course={course.course} "
-                        f"course_id={course.course_id} url={course.task_url}",
+                        f"[xiaoya-task] start course={course.course} course_id={course.course_id} "
+                        f"source={course.source} url={course.task_url}",
                     )
                     try:
                         items = self.scan_task_url_course(
@@ -349,7 +361,7 @@ class XiaoyaScanner:
                         summary["scanned_courses_count"] += 1
                         summary["parsed_assignments_count"] = len(results)
                         summary["todo_count"] = sum(1 for item in results if item.is_todo)
-                        context.emit(percent, f"[xiaoya-task] parsed count={len(items)}")
+                        context.emit(percent, f"[xiaoya-task] parsed_count={len(items)}")
                         context.emit(percent, f"[xiaoya-task] todo candidates={sum(1 for item in items if item.is_todo)}")
                         context.emit(percent, f"[xiaoya-task] done course={course.course}")
                     except PlaywrightTimeoutError:
@@ -421,19 +433,29 @@ class XiaoyaScanner:
         scan_id: str = "manual",
         emit=None,
     ) -> list[AssignmentCandidate]:
+        task_url = course.task_url
+        if "/task" not in task_url:
+            if not course.course_id:
+                raise RuntimeError(f"小雅课程 {course.course} 缺少 task_url 和 course_id")
+            task_url = build_xiaoya_task_url(XIAOYA_DEFAULT_MYCOURSE_URL, course.course_id, href=task_url)
+        active_course = replace(course, task_url=task_url) if task_url != course.task_url else course
         deadline = monotonic_time.monotonic() + course_timeout_seconds
-        page.goto(course.task_url, wait_until="domcontentloaded", timeout=min(10000, course_timeout_seconds * 1000))
+        page.goto(task_url, wait_until="domcontentloaded", timeout=min(10000, course_timeout_seconds * 1000))
+        if emit:
+            emit(f"[xiaoya-task] loaded course={active_course.course} current_url={page.url}")
         remaining_ms = max(1000, int((deadline - monotonic_time.monotonic()) * 1000))
         if emit:
-            emit(f"小雅：等待课程 {course.course} 任务页加载完成")
+            emit(f"小雅：等待课程 {active_course.course} 任务页加载完成")
         text = wait_for_xiaoya_task_page_ready(page, timeout_ms=remaining_ms)
+        if emit:
+            emit(f"[xiaoya-task] visible_text_length={len(text)}")
         if not text.strip() or looks_like_xiaoya_bootstrap_loading(text):
             dump_debug_page(
                 page,
                 self.settings,
                 scan_id=scan_id,
                 stage="not-ready",
-                course=course.course,
+                course=active_course.course,
                 page_no=1,
             )
             raise RuntimeError("小雅任务页加载超时，仍停在应用启动页")
@@ -443,7 +465,7 @@ class XiaoyaScanner:
                 self.settings,
                 scan_id=scan_id,
                 stage="login-or-empty",
-                course=course.course,
+                course=active_course.course,
                 page_no=1,
             )
             raise RuntimeError("小雅登录态可能失效，请先运行 login-xiaoya 手动登录")
@@ -454,23 +476,23 @@ class XiaoyaScanner:
         for page_no in range(1, MAX_XIAOYA_PAGES + 1):
             if monotonic_time.monotonic() >= deadline:
                 if emit:
-                    emit(f"小雅：课程 {course.course} 超过 {course_timeout_seconds} 秒，返回已解析结果")
+                    emit(f"小雅：课程 {active_course.course} 超过 {course_timeout_seconds} 秒，返回已解析结果")
                 break
             page_key = compact_page_key(text)
             if page_key in seen_pages:
                 if emit:
-                    emit(f"小雅：课程 {course.course} 页码内容重复，停止分页")
+                    emit(f"小雅：课程 {active_course.course} 页码内容重复，停止分页")
                 break
             seen_pages.add(page_key)
 
-            page_candidates = self.scan_known_course_page_content(page, course, text)
+            page_candidates = self.scan_task_page_content(page, active_course, text)
             if page_no == 1 and not page_candidates:
                 dump_debug_page(
                     page,
                     self.settings,
                     scan_id=scan_id,
                     stage="empty-parse",
-                    course=course.course,
+                    course=active_course.course,
                     page_no=page_no,
                 )
             for candidate in page_candidates:
@@ -479,9 +501,17 @@ class XiaoyaScanner:
                     continue
                 seen_assignments.add(key)
                 all_candidates.append(candidate)
+                if emit:
+                    emit(
+                        "[xiaoya-task] parsed "
+                        f"title={candidate.title} status_raw={candidate.status_raw} "
+                        f"status_normalized={candidate.status_normalized} "
+                        f"due_at={candidate.due_at.isoformat(timespec='seconds')} "
+                        f"is_todo={str(candidate.is_todo).lower()}"
+                    )
             if emit:
                 emit(
-                    f"小雅：课程 {course.course} 第 {page_no} 页识别 {len(page_candidates)} 条 "
+                    f"小雅：课程 {active_course.course} 第 {page_no} 页识别 {len(page_candidates)} 条 "
                     f"titles={[candidate.title for candidate in page_candidates]}"
                 )
 
@@ -501,12 +531,12 @@ class XiaoyaScanner:
                 text = wait_for_xiaoya_task_page_ready(page, timeout_ms=remaining_ms)
             except PlaywrightTimeoutError:
                 if emit:
-                    emit(f"小雅：课程 {course.course} 翻页后内容未变化，停止分页")
+                    emit(f"小雅：课程 {active_course.course} 翻页后内容未变化，停止分页")
                 break
 
         return all_candidates
 
-    def scan_known_course_text(self, course: KnownCourseConfig, text: str) -> list[AssignmentCandidate]:
+    def scan_task_page_text(self, course: KnownCourseConfig, text: str) -> list[AssignmentCandidate]:
         return parse_xiaoya_task_text(
             text,
             course=course.course,
@@ -514,7 +544,7 @@ class XiaoyaScanner:
             course_id=course.course_id,
         )
 
-    def scan_known_course_page_content(
+    def scan_task_page_content(
         self, page: Page, course: KnownCourseConfig, text: str
     ) -> list[AssignmentCandidate]:
         dom_candidates = parse_xiaoya_task_rows(
@@ -525,7 +555,50 @@ class XiaoyaScanner:
         )
         if dom_candidates:
             return dom_candidates
-        return self.scan_known_course_text(course, text)
+        return self.scan_task_page_text(course, text)
+
+    def scan_known_course_text(self, course: KnownCourseConfig, text: str) -> list[AssignmentCandidate]:
+        return self.scan_task_page_text(course, text)
+
+    def scan_known_course_page_content(
+        self, page: Page, course: KnownCourseConfig, text: str
+    ) -> list[AssignmentCandidate]:
+        return self.scan_task_page_content(page, course, text)
+
+
+def scan_xiaoya_task_page(
+    page: Page,
+    course: KnownCourseConfig,
+    *,
+    settings: Settings | None = None,
+    course_timeout_seconds: int = 30,
+    scan_id: str = "manual",
+    emit: Callable[[str], None] | None = None,
+) -> list[AssignmentCandidate]:
+    return XiaoyaScanner(settings).scan_task_url_course(
+        page,
+        course,
+        course_timeout_seconds=course_timeout_seconds,
+        scan_id=scan_id,
+        emit=emit,
+    )
+
+
+def emit_xiaoya_merge_log(
+    courses: list[KnownCourseConfig],
+    *,
+    known_count: int,
+    discovered_count: int,
+    emit: Callable[[str], None],
+) -> None:
+    emit(f"[xiaoya-merge] known_count={known_count}")
+    emit(f"[xiaoya-merge] discovered_count={discovered_count}")
+    emit(f"[xiaoya-merge] merged_count={len(courses)}")
+    for course in courses:
+        emit(
+            f"[xiaoya-merge] merged course={course.course} source={course.source} "
+            f"course_id={course.course_id} task_url={course.task_url}"
+        )
 
 
 def parse_xiaoya_task_rows(
