@@ -7,6 +7,7 @@ from homework_watcher.app import (
     format_due_distance,
     render_assignment_table,
     render_auth_panel,
+    render_scan_guide,
     render_page_script,
 )
 from homework_watcher.scan_progress import ScanCancelled, ScanProgressStore
@@ -107,6 +108,15 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("学号", panel)
         self.assertIn("显示名", panel)
         self.assertNotIn("用户名", panel)
+
+    def test_scan_guide_includes_zero_start_and_mobile_qr_hint(self) -> None:
+        guide = render_scan_guide()
+
+        self.assertIn("登录本站", guide)
+        self.assertIn("授权平台", guide)
+        self.assertIn("立即扫描", guide)
+        self.assertIn("移动端", guide)
+        self.assertIn("扫码登录", guide)
 
     def test_format_due_distance(self) -> None:
         self.assertEqual(

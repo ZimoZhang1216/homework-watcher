@@ -69,6 +69,7 @@ def create_app() -> FastAPI:
                     <span class="count">{len(todos)}</span>
                   </div>
                   <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。点击“立即扫描”会读取已登录平台的作业列表，不会提交或修改平台内容。</p>
+                  {render_scan_guide()}
                   {render_assignment_table(todos)}
                   <div class="actions">
                     <form method="post" action="/scan?redirect=1" id="scan-form">
@@ -524,6 +525,29 @@ def render_scan_progress_panel() -> str:
     """
 
 
+def render_scan_guide() -> str:
+    return """
+    <div class="scan-guide" aria-label="扫描步骤指南">
+      <div class="guide-step">
+        <span class="guide-index">1</span>
+        <div><strong>登录本站</strong><span>用学号进入系统。</span></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-index">2</span>
+        <div><strong>授权平台</strong><span>在“平台登录”中分别打开长江雨课堂和小雅。移动端进入这两个平台时通常只能扫码登录，请用手机扫码完成授权。</span></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-index">3</span>
+        <div><strong>开始扫描</strong><span>回到待办页点击“立即扫描”，等待进度条完成。</span></div>
+      </div>
+      <div class="guide-step">
+        <span class="guide-index">4</span>
+        <div><strong>查看待办</strong><span>只保留未完成作业；已完成记录在“查看所有记录”中。</span></div>
+      </div>
+    </div>
+    """
+
+
 def render_scan_summary(result) -> str:
     if result is None:
         return ""
@@ -690,6 +714,35 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     .panel + .panel {{ margin-top: 18px; }}
     .panel-title {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
     .page-note {{ max-width: 760px; margin: 10px 0 18px; }}
+    .scan-guide {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 16px 0 18px;
+    }}
+    .guide-step {{
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface-subtle);
+      padding: 12px;
+    }}
+    .guide-index {{
+      display: inline-flex;
+      width: 28px;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: var(--primary);
+      color: var(--on-primary);
+      font-weight: 800;
+    }}
+    .guide-step strong {{ display: block; color: var(--text); }}
+    .guide-step span:not(.guide-index) {{ display: block; margin-top: 2px; color: var(--muted); font-size: 14px; }}
     .count {{
       display: inline-flex;
       min-width: 30px;
@@ -817,6 +870,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       .panel {{ padding: 18px; }}
       .panel-title {{ align-items: flex-start; }}
       .page-note {{ margin-bottom: 16px; }}
+      .scan-guide {{ grid-template-columns: 1fr; }}
       .actions {{ flex-direction: column; }}
       .actions > *, .actions form, .actions button, .actions .button-link {{ width: 100%; }}
       .actions button, .actions .button-link {{ box-sizing: border-box; }}
