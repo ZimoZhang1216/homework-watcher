@@ -7,7 +7,3 @@ xiaoya:
   base_url: "https://nankai.ai-augmented.com"
   auto_discover_courses: true
   mycourse_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse"
-  known_courses:
-    - course: "结构化学"
-      course_id: "6902426124991620398"
-      task_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task"

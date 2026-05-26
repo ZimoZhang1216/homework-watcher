@@ -31,12 +31,6 @@ def main(argv: list[str] | None = None) -> int:
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
     login_xiaoya_parser.set_defaults(handler=cmd_login_xiaoya)
 
-    scan_known_xiaoya_parser = subparsers.add_parser(
-        "scan-known-xiaoya", help="扫描小雅配置的 known_courses 并输出诊断结果"
-    )
-    scan_known_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
-    scan_known_xiaoya_parser.set_defaults(handler=cmd_scan_known_xiaoya)
-
     discover_xiaoya_parser = subparsers.add_parser(
         "discover-xiaoya-courses", help="只发现小雅课程，不写 assignments"
     )
@@ -95,10 +89,6 @@ def cmd_scan(args) -> int:
 def cmd_login_xiaoya(_args) -> int:
     login_xiaoya(load_settings())
     return 0
-
-
-def cmd_scan_known_xiaoya(_args) -> int:
-    return run_xiaoya_scan_diagnostic(_args)
 
 
 def cmd_scan_xiaoya_auto(_args) -> int:

@@ -9,7 +9,7 @@
 - SQLite assignments 表
 - 统一 `ScanService`：Web 按钮和 CLI 共用同一套扫描链路
 - 长江雨课堂课程作业扫描
-- 小雅 `known_courses.task_url` 通用扫描
+- 小雅自动课程发现和作业扫描
 - Playwright 持久化登录态
 - CLI 诊断命令
 - scan 日志和脱敏 debug dump
@@ -55,13 +55,11 @@ changjiang-yuketang:
 xiaoya:
   enabled: true
   base_url: "https://nankai.ai-augmented.com"
-  known_courses:
-    - course: "课程名"
-      course_id: "课程 ID"
-      task_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse/课程 ID/task"
+  auto_discover_courses: true
+  mycourse_url: "https://nankai.ai-augmented.com/app/jx-web/mycourse"
 ```
 
-长江雨课堂会从课程列表进入每门课解析作业。小雅优先扫描 `known_courses`，不依赖从课程总页猜任务入口。
+长江雨课堂和小雅都会从课程列表自动发现课程并解析作业；不再需要手工配置课程 ID 或任务页 URL。
 
 ## 本地运行
 
@@ -83,10 +81,10 @@ python -m homework_watcher.cli login-xiaoya
 
 程序只打开浏览器保存登录态，不读取、不保存、不提交密码，不绕过验证码。
 
-诊断扫描小雅 known courses：
+诊断扫描小雅：
 
 ```bash
-python -m homework_watcher.cli scan-known-xiaoya
+python -m homework_watcher.cli scan-xiaoya-auto
 python -m homework_watcher.cli db-list
 ```
 
@@ -175,14 +173,14 @@ cd v2
 source .venv/bin/activate
 python -m homework_watcher.cli health
 python -m homework_watcher.cli scan --platform changjiang-yuketang
-python -m homework_watcher.cli scan-known-xiaoya
+python -m homework_watcher.cli scan-xiaoya-auto
 python -m homework_watcher.cli db-list
 python -m homework_watcher.app
 ```
 
 小雅验收重点：
 
-- `scan-known-xiaoya` 输出 `xiaoya_assignment_count` 和 `xiaoya_todo_count`。
+- `scan-xiaoya-auto` 输出 `xiaoya_assignment_count` 和 `xiaoya_todo_count`。
 - 当前任务状态如 `进行中`、`未提交`、`待完成`、`未完成` 会进入待办。
 - 已完成或已截止任务会保留在所有记录里，但不进入当前待办。
 

@@ -555,9 +555,8 @@ def render_scan_summary(result) -> str:
     if not summary:
         return ""
     fields = [
-        ("已配置课程", "known_courses_count"),
         ("自动发现课程", "discovered_courses_count"),
-        ("合并后课程", "merged_courses_count"),
+        ("待扫描课程", "merged_courses_count"),
         ("已扫描课程", "scanned_courses_count"),
         ("失败课程", "failed_courses_count"),
         ("解析作业", "parsed_assignments_count"),

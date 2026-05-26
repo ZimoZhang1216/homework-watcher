@@ -13,7 +13,6 @@ from homework_watcher.remote_login import profile_dir_for_user_platform
 from homework_watcher.scanners.xiaoya_discovery import (
     XIAOYA_DEFAULT_MYCOURSE_URL,
     XiaoyaCourseDiscoverer,
-    merge_xiaoya_courses,
 )
 from homework_watcher.settings import Settings, load_settings
 from homework_watcher.status import normalize_status
@@ -271,7 +270,6 @@ class XiaoyaScanner:
         config = context.platform_config
         summary = {
             "platform_label": XIAOYA_PLATFORM_LABEL,
-            "known_courses_count": len(config.known_courses) if config is not None else 0,
             "discovered_courses_count": 0,
             "merged_courses_count": 0,
             "scanned_courses_count": 0,
@@ -285,8 +283,8 @@ class XiaoyaScanner:
         if config is None or not config.enabled:
             context.emit(5, "小雅：未启用，跳过")
             return []
-        if not config.known_courses and not config.auto_discover_courses:
-            context.emit(5, "小雅：没有配置 known_courses 且未开启自动发现，跳过")
+        if not config.auto_discover_courses:
+            context.emit(5, "小雅：未开启自动发现，跳过")
             return []
 
         profile_dir = self.profile_dir_for_user(context.user_key)
@@ -311,37 +309,29 @@ class XiaoyaScanner:
                             scan_id=context.scan_id,
                             emit=lambda message: context.emit(12, message),
                         )
-                    except Exception as exc:  # noqa: BLE001 - discovery failure must not block known courses.
+                    except Exception as exc:  # noqa: BLE001 - surface discovery failure without crashing scan.
                         context.emit(
                             12,
                             f"[xiaoya-discover] failed type={type(exc).__name__} message={exc}",
                         )
 
-                merge = merge_xiaoya_courses(
-                    config.known_courses,
-                    discovered_courses,
-                    emit=lambda message: context.emit(13, message),
-                )
                 summary.update(
                     {
-                        "known_courses_count": merge.known_count,
-                        "discovered_courses_count": merge.discovered_count,
-                        "merged_courses_count": len(merge.courses),
-                        "duplicates_count": merge.duplicates_count,
+                        "discovered_courses_count": len(discovered_courses),
+                        "merged_courses_count": len(discovered_courses),
                     }
                 )
                 context.emit(
                     13,
-                    "[xiaoya-discover] merged with known "
-                    f"count={len(merge.courses)} known={merge.known_count} "
-                    f"discovered={merge.discovered_count} duplicates={merge.duplicates_count}",
+                    "[xiaoya-discover] using discovered courses "
+                    f"count={len(discovered_courses)} discovered={len(discovered_courses)}",
                 )
-                if not merge.courses:
+                if not discovered_courses:
                     context.emit(15, "小雅：没有可扫描课程，跳过")
                     return []
 
-                for index, course in enumerate(merge.courses, start=1):
-                    percent = 15 + int(index / max(len(merge.courses), 1) * 70)
+                for index, course in enumerate(discovered_courses, start=1):
+                    percent = 15 + int(index / max(len(discovered_courses), 1) * 70)
                     context.emit(
                         percent,
                         f"[xiaoya-task] start source={course.source} course={course.course} "
