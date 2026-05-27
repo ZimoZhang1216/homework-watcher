@@ -81,7 +81,7 @@ def create_app() -> FastAPI:
                   </div>
                   {render_scan_progress_panel()}
                 </section>
-                {render_scan_summaries(latest_result)}
+                {render_scan_summary(latest_result)}
                 {render_platform_login_panel(login_status)}
                 """,
                 settings=settings,
@@ -565,58 +565,21 @@ def render_scan_guide() -> str:
 
 
 def render_scan_summary(result) -> str:
-    return render_platform_scan_summary(
-        result,
-        platform_key="xiaoya",
-        title="小雅最近扫描摘要",
-        count_key="merged_courses_count",
-        fields=[
-            ("自动发现课程", "discovered_courses_count"),
-            ("待扫描课程", "merged_courses_count"),
-            ("已扫描课程", "scanned_courses_count"),
-            ("失败课程", "failed_courses_count"),
-            ("解析作业", "parsed_assignments_count"),
-            ("当前待办", "todo_count"),
-        ],
-    )
-
-
-def render_scan_summaries(result) -> str:
-    return "".join(
-        [
-            render_scan_summary(result),
-            render_platform_scan_summary(
-                result,
-                platform_key="changjiang-yuketang",
-                title="长江雨课堂最近扫描摘要",
-                count_key="discovered_courses_count",
-                fields=[
-                    ("发现课程", "discovered_courses_count"),
-                    ("已扫描课程", "scanned_courses_count"),
-                    ("失败课程", "failed_courses_count"),
-                    ("解析作业", "parsed_assignments_count"),
-                    ("当前待办", "todo_count"),
-                ],
-            ),
-        ]
-    )
-
-
-def render_platform_scan_summary(
-    result,
-    *,
-    platform_key: str,
-    title: str,
-    count_key: str,
-    fields: list[tuple[str, str]],
-) -> str:
     if result is None:
         return ""
-    summary = platform_summaries_from_scan_result(result).get(platform_key, {})
+    summary = platform_summaries_from_scan_result(result).get("xiaoya", {})
     if not summary:
         return ""
     status_message = str(summary.get("message") or "").strip()
     status_note = f'<p class="muted summary-note">{escape(status_message)}</p>' if status_message else ""
+    fields = [
+        ("自动发现课程", "discovered_courses_count"),
+        ("待扫描课程", "merged_courses_count"),
+        ("已扫描课程", "scanned_courses_count"),
+        ("失败课程", "failed_courses_count"),
+        ("解析作业", "parsed_assignments_count"),
+        ("当前待办", "todo_count"),
+    ]
     cells = "".join(
         f'<div><span class="label">{escape(label)}</span><strong>{escape(str(summary.get(key, 0)))}</strong></div>'
         for label, key in fields
@@ -624,8 +587,8 @@ def render_platform_scan_summary(
     return f"""
     <section class="panel summary-panel">
       <div class="panel-title">
-        <h2>{escape(title)}</h2>
-        <span class="count">{escape(str(summary.get(count_key, 0)))}</span>
+        <h2>小雅最近扫描摘要</h2>
+        <span class="count">{escape(str(summary.get("merged_courses_count", 0)))}</span>
       </div>
       {status_note}
       <div class="summary-grid">{cells}</div>

@@ -50,78 +50,36 @@ class ChangjiangYuketangScanner:
         return profile_dir_for_user_platform(self.settings, user_key, CHANGJIANG_PLATFORM_KEY)
 
     def scan(self, context) -> list[AssignmentCandidate]:
-        summary = {
-            "platform_label": CHANGJIANG_PLATFORM_LABEL,
-            "status": "running",
-            "message": "长江雨课堂：准备扫描",
-            "discovered_courses_count": 0,
-            "scanned_courses_count": 0,
-            "failed_courses_count": 0,
-            "parsed_assignments_count": 0,
-        }
-        context.metadata[CHANGJIANG_PLATFORM_KEY] = summary
         config = context.platform_config
         if config is not None and not config.enabled:
             context.emit(5, "长江雨课堂：未启用，跳过")
-            summary.update(
-                {
-                    "status": "skipped",
-                    "message": "长江雨课堂：未启用，跳过",
-                }
-            )
             return []
 
         profile_dir = self.profile_dir_for_user(context.user_key)
         profile_dir.mkdir(parents=True, exist_ok=True)
         start_url = config.base_url if config is not None and config.base_url else DEFAULT_YUKETANG_URL
         context.emit(10, "长江雨课堂：打开浏览器登录态")
-        try:
-            with sync_playwright() as playwright:
-                browser_context = playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_dir),
-                    headless=self.headless,
-                    locale="zh-CN",
-                    viewport={"width": 1440, "height": 1000},
-                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+        with sync_playwright() as playwright:
+            browser_context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=self.headless,
+                locale="zh-CN",
+                viewport={"width": 1440, "height": 1000},
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                prefer_student_entry(browser_context)
+                page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+                return self.scan_course_list(
+                    page,
+                    start_url=start_url,
+                    scan_id=context.scan_id,
+                    emit=context.emit,
                 )
-                try:
-                    prefer_student_entry(browser_context)
-                    page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
-                    assignments = self.scan_course_list(
-                        page,
-                        start_url=start_url,
-                        scan_id=context.scan_id,
-                        emit=context.emit,
-                        summary=summary,
-                    )
-                finally:
-                    browser_context.close()
-            summary.update(
-                {
-                    "status": "succeeded",
-                    "message": f"长江雨课堂：扫描完成，识别 {len(assignments)} 条作业",
-                    "parsed_assignments_count": len(assignments),
-                }
-            )
-            return assignments
-        except Exception as exc:
-            summary.update(
-                {
-                    "status": "failed",
-                    "message": f"长江雨课堂：扫描失败 {type(exc).__name__}: {exc}",
-                }
-            )
-            raise
+            finally:
+                browser_context.close()
 
-    def scan_course_list(
-        self,
-        page: Page,
-        *,
-        start_url: str,
-        scan_id: str,
-        emit,
-        summary: dict[str, object] | None = None,
-    ) -> list[AssignmentCandidate]:
+    def scan_course_list(self, page: Page, *, start_url: str, scan_id: str, emit) -> list[AssignmentCandidate]:
         page.goto(start_url, wait_until="domcontentloaded", timeout=20_000)
         wait_until_ready(page)
         ensure_student_tab(page)
@@ -138,8 +96,6 @@ class ChangjiangYuketangScanner:
             raise RuntimeError("长江雨课堂登录态可能失效，请先在网页中打开长江雨课堂登录")
 
         course_cards = collect_course_cards(page)
-        if summary is not None:
-            summary["discovered_courses_count"] = len(course_cards)
         emit(25, f"长江雨课堂：发现 {len(course_cards)} 门课程")
         if not course_cards:
             text = safe_body_text(page)
@@ -159,13 +115,9 @@ class ChangjiangYuketangScanner:
                     page_no=1,
                 )
             emit(88, f"长江雨课堂：完成，识别 {len(assignments)} 条")
-            if summary is not None:
-                summary["parsed_assignments_count"] = len(assignments)
             return assignments
 
         assignments: list[AssignmentCandidate] = []
-        scanned_courses_count = 0
-        failed_courses_count = 0
         for index, course_name in enumerate(course_cards):
             percent = 25 + int((index + 1) / max(len(course_cards), 1) * 60)
             emit(percent, f"长江雨课堂：扫描课程 {index + 1}/{len(course_cards)} {course_name}")
@@ -176,15 +128,9 @@ class ChangjiangYuketangScanner:
             cards = page.locator(".studentCol")
             try:
                 if index >= cards.count():
-                    failed_courses_count += 1
-                    if summary is not None:
-                        summary["failed_courses_count"] = failed_courses_count
                     continue
                 cards.nth(index).click(timeout=8_000)
             except Exception:
-                failed_courses_count += 1
-                if summary is not None:
-                    summary["failed_courses_count"] = failed_courses_count
                 continue
             wait_until_ready(page, network_timeout=10_000, settle_ms=1_200)
             text = safe_body_text(page)
@@ -196,14 +142,8 @@ class ChangjiangYuketangScanner:
             )
             emit(percent, f"长江雨课堂：课程 {course_name} 识别 {len(page_assignments)} 条")
             assignments.extend(page_assignments)
-            scanned_courses_count += 1
-            if summary is not None:
-                summary["scanned_courses_count"] = scanned_courses_count
-                summary["parsed_assignments_count"] = len(assignments)
 
         assignments = dedupe_assignments(assignments)
-        if summary is not None:
-            summary["parsed_assignments_count"] = len(assignments)
         if not assignments:
             dump_debug_page(
                 page,

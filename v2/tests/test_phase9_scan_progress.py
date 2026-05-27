@@ -9,7 +9,6 @@ from homework_watcher.app import (
     render_auth_panel,
     render_scan_guide,
     render_scan_summary,
-    render_scan_summaries,
     render_page_script,
 )
 from homework_watcher.scan_progress import ScanCancelled, ScanProgressStore
@@ -169,32 +168,6 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("小雅：扫描完成", summary)
         self.assertIn(">8<", summary)
         self.assertIn(">12<", summary)
-
-    def test_scan_summaries_render_changjiang_yuketang_summary(self) -> None:
-        html = render_scan_summaries(
-            {
-                "scan_id": "scan-test",
-                "todos": [{"title": "热学 第 3 次作业(1)"}],
-                "platform_summaries": {
-                    "changjiang-yuketang": {
-                        "discovered_courses_count": 3,
-                        "scanned_courses_count": 3,
-                        "failed_courses_count": 0,
-                        "parsed_assignments_count": 5,
-                        "todo_count": 2,
-                        "message": "长江雨课堂：扫描完成，识别 5 条作业",
-                    }
-                },
-            }
-        )
-
-        self.assertIn("长江雨课堂最近扫描摘要", html)
-        self.assertIn("长江雨课堂：扫描完成", html)
-        self.assertIn("发现课程", html)
-        self.assertIn("当前待办", html)
-        self.assertIn(">3<", html)
-        self.assertIn(">5<", html)
-        self.assertIn(">2<", html)
 
     def test_web_scan_parses_cli_progress_jsonl(self) -> None:
         line = '{"type":"progress","percent":37,"message":"小雅：扫描课程 结构化学"}'
