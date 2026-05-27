@@ -594,7 +594,11 @@ def resolve_course_cards_by_clicking(
             break
         if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
             break
-        if not click_next_xiaoya_course_list_page(page):
+        if not click_next_xiaoya_course_list_page(page, target_page_no=list_page_no + 1):
+            emit_discovery(
+                emit,
+                f"[xiaoya-click-discover] skipped reason=no_next_page list_page={list_page_no}",
+            )
             break
 
     unique = dedupe_raw_course_candidates(resolved)
@@ -652,23 +656,23 @@ def open_xiaoya_course_list_page(
             timeout_ms = min(timeout_ms, max(1000, remaining_deadline_ms(deadline)))
         page.goto(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
         page.wait_for_timeout(min(COURSE_LIST_PAGE_WAIT_MS, remaining_deadline_ms(deadline)))
-        for _ in range(1, page_no):
+        for target_page_no in range(2, page_no + 1):
             if deadline is not None and remaining_deadline_ms(deadline) <= 0:
                 return False
-            if not click_next_xiaoya_course_list_page(page):
+            if not click_next_xiaoya_course_list_page(page, target_page_no=target_page_no):
                 return False
         return True
     except Exception:
         return False
 
 
-def click_next_xiaoya_course_list_page(page: Page) -> bool:
+def click_next_xiaoya_course_list_page(page: Page, *, target_page_no: int | None = None) -> bool:
     previous_text = read_xiaoya_body_text(page)
     try:
         clicked = bool(
             page.evaluate(
                 """
-                () => {
+                (targetPageNo) => {
                   const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
                   const visible = element => {
                     if (!element) return false;
@@ -691,6 +695,45 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
                     target.click();
                     return true;
                   };
+                  const pageText = element => compact(element.innerText || element.textContent || element.getAttribute('aria-label') || element.title || '');
+                  const paginationRoots = Array.from(document.querySelectorAll(
+                    '.ant-pagination, .el-pagination, [class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]'
+                  )).filter(visible);
+                  const roots = paginationRoots.length ? paginationRoots : [document.body];
+                  const targetText = targetPageNo ? String(targetPageNo) : '';
+                  const textLooksLikeTargetPage = (element, text) => {
+                    if (!targetText) return false;
+                    if (text === targetText) return true;
+                    const title = compact(element.getAttribute('title') || '');
+                    const label = compact(element.getAttribute('aria-label') || '');
+                    if (title === targetText) return true;
+                    return [title, label].some(value =>
+                      value === `第${targetText}页` ||
+                      value === `第 ${targetText} 页` ||
+                      value.toLowerCase() === `page ${targetText}` ||
+                      value.toLowerCase() === `${targetText} page`
+                    );
+                  };
+                  if (targetText) {
+                    const targetSelectors = [
+                      `.ant-pagination-item-${targetText}`,
+                      `[title="${targetText}"]`,
+                      `[aria-label="第 ${targetText} 页"]`,
+                      `[aria-label="第${targetText}页"]`,
+                      `[aria-label="Page ${targetText}"]`,
+                      `[aria-label="${targetText} page"]`
+                    ];
+                    for (const root of roots) {
+                      for (const selector of targetSelectors) {
+                        for (const element of Array.from(root.querySelectorAll(selector))) {
+                          if (clickTarget(element)) return true;
+                        }
+                      }
+                      for (const element of Array.from(root.querySelectorAll('button,a,li,span,div,[role="button"]'))) {
+                        if (textLooksLikeTargetPage(element, pageText(element)) && clickTarget(element)) return true;
+                      }
+                    }
+                  }
                   const selectors = [
                     '.ant-pagination-next:not(.ant-pagination-disabled)',
                     'li[title="下一页"]:not(.ant-pagination-disabled)',
@@ -707,11 +750,6 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
                       if (clickTarget(element)) return true;
                     }
                   }
-                  const pageText = element => compact(element.innerText || element.textContent || element.getAttribute('aria-label') || element.title || '');
-                  const paginationRoots = Array.from(document.querySelectorAll(
-                    '.ant-pagination, .el-pagination, [class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]'
-                  )).filter(visible);
-                  const roots = paginationRoots.length ? paginationRoots : [document.body];
                   const activeNodes = roots.flatMap(root => Array.from(root.querySelectorAll(
                     '.ant-pagination-item-active, [aria-current="page"], [class*="active"], [class*="Active"], [class*="current"], [class*="Current"]'
                   )));
@@ -736,7 +774,8 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
                   }
                   return false;
                 }
-                """
+                """,
+                int(target_page_no or 0),
             )
         )
         if not clicked:
