@@ -1287,7 +1287,13 @@ app = create_app()
 
 def main() -> None:
     settings = load_settings()
-    uvicorn.run("homework_watcher.app:app", host=settings.host, port=settings.port)
+    uvicorn.run(
+        "homework_watcher.app:app",
+        host=settings.host,
+        port=settings.port,
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1",
+    )
 
 
 if __name__ == "__main__":

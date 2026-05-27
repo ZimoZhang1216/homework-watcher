@@ -9,6 +9,9 @@ SRC_DIR="${SRC_DIR:-/opt/homework-watcher-src}"
 APP_DIR="${APP_DIR:-/opt/homework-watcher-v2}"
 ENV_FILE="${ENV_FILE:-/etc/homework-watcher-v2.env}"
 PUBLIC_IP="${PUBLIC_IP:-8.141.109.80}"
+APP_DOMAIN="${APP_DOMAIN:-}"
+ENABLE_HTTPS="${ENABLE_HTTPS:-0}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 REPO_URL="${REPO_URL:-https://github.com/ZimoZhang1216/homework-watcher.git}"
 OLD_PROFILE_ROOT="${OLD_PROFILE_ROOT:-/var/lib/homework-watcher/web/users/1/browser-profiles}"
 OLD_PROFILE_DIR="${OLD_PROFILE_DIR:-$OLD_PROFILE_ROOT/xiaoya}"
@@ -19,6 +22,15 @@ log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
 }
 
+env_quote() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\\$}"
+  value="${value//\`/\\\`}"
+  printf '"%s"' "$value"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this script as root, for example: sudo bash deploy/install-aliyun-v2.sh" >&2
   exit 2
@@ -26,6 +38,26 @@ fi
 
 if [ -n "$REQUESTED_NOVNC_PASSWORD" ] && [ "${#REQUESTED_NOVNC_PASSWORD}" -gt 8 ]; then
   echo "NOVNC_PASSWORD must be 8 characters or fewer because VNC passwords are limited to 8 characters." >&2
+  exit 2
+fi
+
+APP_DOMAIN="${APP_DOMAIN#http://}"
+APP_DOMAIN="${APP_DOMAIN#https://}"
+APP_DOMAIN="${APP_DOMAIN%%/*}"
+case "$ENABLE_HTTPS" in
+  1|true|TRUE|yes|YES) ENABLE_HTTPS=1 ;;
+  0|false|FALSE|no|NO|"") ENABLE_HTTPS=0 ;;
+  *)
+    echo "ENABLE_HTTPS must be 1/0, true/false, or yes/no." >&2
+    exit 2
+    ;;
+esac
+if [ "$ENABLE_HTTPS" = "1" ] && [ -z "$APP_DOMAIN" ]; then
+  echo "APP_DOMAIN is required when ENABLE_HTTPS=1." >&2
+  exit 2
+fi
+if [ "$ENABLE_HTTPS" = "1" ] && [ -z "$CERTBOT_EMAIL" ]; then
+  echo "CERTBOT_EMAIL is required when ENABLE_HTTPS=1." >&2
   exit 2
 fi
 
@@ -93,6 +125,42 @@ if [ -n "$REQUESTED_NOVNC_PASSWORD" ]; then
 else
   : "${NOVNC_PASSWORD:=}"
 fi
+
+APP_DOMAIN="${APP_DOMAIN:-}"
+ENABLE_HTTPS="${ENABLE_HTTPS:-0}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+APP_DOMAIN="${APP_DOMAIN#http://}"
+APP_DOMAIN="${APP_DOMAIN#https://}"
+APP_DOMAIN="${APP_DOMAIN%%/*}"
+case "$ENABLE_HTTPS" in
+  1|true|TRUE|yes|YES) ENABLE_HTTPS=1 ;;
+  0|false|FALSE|no|NO|"") ENABLE_HTTPS=0 ;;
+  *)
+    echo "ENABLE_HTTPS must be 1/0, true/false, or yes/no." >&2
+    exit 2
+    ;;
+esac
+if [ "$ENABLE_HTTPS" = "1" ] && [ -z "$APP_DOMAIN" ]; then
+  echo "APP_DOMAIN is required when ENABLE_HTTPS=1." >&2
+  exit 2
+fi
+if [ "$ENABLE_HTTPS" = "1" ] && [ -z "$CERTBOT_EMAIL" ]; then
+  echo "CERTBOT_EMAIL is required when ENABLE_HTTPS=1." >&2
+  exit 2
+fi
+WEB_SCHEME="http"
+if [ "$ENABLE_HTTPS" = "1" ]; then
+  WEB_SCHEME="https"
+  log "installing certbot for HTTPS"
+  apt-get install -y --no-install-recommends certbot python3-certbot-nginx
+fi
+WEB_HOST="$PUBLIC_IP"
+if [ -n "$APP_DOMAIN" ]; then
+  WEB_HOST="$APP_DOMAIN"
+fi
+PUBLIC_BASE_URL="$WEB_SCHEME://$WEB_HOST"
+: "${HW_WEB_NOVNC_URL:=$PUBLIC_BASE_URL/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify}"
+NGINX_SERVER_NAME="${APP_DOMAIN:-_}"
 
 if [ -d "$SRC_DIR/.git" ]; then
   log "updating repository in $SRC_DIR"
@@ -172,10 +240,14 @@ LOGS_DIR=$LOGS_DIR
 HOST=$HOST
 PORT=$PORT
 APP_SECRET_KEY=$APP_SECRET_KEY
+APP_DOMAIN=$APP_DOMAIN
+ENABLE_HTTPS=$ENABLE_HTTPS
+CERTBOT_EMAIL=$CERTBOT_EMAIL
+HW_WEB_NOVNC_URL=$(env_quote "$HW_WEB_NOVNC_URL")
 DISPLAY=:99
 XVFB_SCREEN=1440x1000x24
 PLAYWRIGHT_BROWSERS_PATH=$APP_DIR/ms-playwright
-NOVNC_PASSWORD=$NOVNC_PASSWORD
+NOVNC_PASSWORD=$(env_quote "$NOVNC_PASSWORD")
 ENV
 chmod 600 "$ENV_FILE"
 
@@ -255,48 +327,55 @@ TimeoutStopSec=20
 WantedBy=multi-user.target
 SERVICE
 
-cat >/etc/nginx/sites-available/homework-watcher-v2 <<'NGINX'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+{
+  echo "server {"
+  if [ -n "$APP_DOMAIN" ]; then
+    echo "    listen 80;"
+    echo "    listen [::]:80;"
+  else
+    echo "    listen 80 default_server;"
+    echo "    listen [::]:80 default_server;"
+  fi
+  cat <<NGINX
+    server_name $NGINX_SERVER_NAME;
     client_max_body_size 20m;
 
     location /vnc/ {
         proxy_pass http://127.0.0.1:6080/;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 86400;
     }
 
     location /websockify {
         proxy_pass http://127.0.0.1:6080/websockify;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 86400;
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 300;
     }
 }
 NGINX
+} >/etc/nginx/sites-available/homework-watcher-v2
 
 rm -f /etc/nginx/sites-enabled/default
 rm -f /etc/nginx/sites-enabled/homework-watcher
@@ -310,14 +389,24 @@ systemctl restart nginx
 systemctl enable homework-watcher-v2
 systemctl restart homework-watcher-v2
 
+if [ "$ENABLE_HTTPS" = "1" ]; then
+  log "requesting HTTPS certificate for $APP_DOMAIN"
+  certbot --nginx --non-interactive --agree-tos --email "$CERTBOT_EMAIL" \
+    --redirect --keep-until-expiring -d "$APP_DOMAIN"
+  nginx -t
+  systemctl reload nginx
+fi
+
 sleep 8
 
 cat >/root/homework-watcher-v2-deployment.txt <<CREDS
 homework-watcher v2 deployment
-URL: http://$PUBLIC_IP/
-Health: http://$PUBLIC_IP/health
-noVNC URL: http://$PUBLIC_IP/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
-Web login: http://$PUBLIC_IP/
+URL: $PUBLIC_BASE_URL/
+Health: $PUBLIC_BASE_URL/health
+noVNC URL: $HW_WEB_NOVNC_URL
+Web login: $PUBLIC_BASE_URL/
+Domain: ${APP_DOMAIN:-not configured}
+HTTPS enabled: $ENABLE_HTTPS
 Xiaoya CLI login helper: homework-watcher-v2-login-xiaoya
 Environment file: $ENV_FILE
 Service: homework-watcher-v2

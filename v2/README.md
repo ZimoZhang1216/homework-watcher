@@ -139,6 +139,74 @@ bash deploy/install-aliyun-v2.sh
 
 默认部署到 `http://8.141.109.80/`，停止旧版 `homework-watcher-web` 服务但保留旧数据目录 `/var/lib/homework-watcher/web`。如果旧版用户 1 的小雅浏览器 profile 存在，脚本会在 v2 profile 为空时复制一次，尽量复用已登录状态。
 
+### 绑定备案域名和 HTTPS
+
+域名备案通过后，推荐让阿里云 DNS 增加一个 `A` 记录指向 ECS 公网 IP `8.141.109.80`，例如：
+
+```text
+主机记录: hw
+记录类型: A
+记录值: 8.141.109.80
+```
+
+这样最终访问地址就是 `https://hw.example.com/`。如果要直接使用根域名，把主机记录改成 `@`。
+
+在 ECS 安全组中确认入方向已开放：
+
+```text
+TCP 80   0.0.0.0/0
+TCP 443  0.0.0.0/0
+TCP 22   你的管理 IP 或 0.0.0.0/0
+```
+
+等待 DNS 生效后可以先检查解析：
+
+```bash
+dig +short hw.example.com
+```
+
+在服务器上执行正式域名部署：
+
+```bash
+cd /opt/homework-watcher-src
+sudo bash -lc 'export APP_DOMAIN=hw.example.com ENABLE_HTTPS=1 CERTBOT_EMAIL=you@example.com; git fetch --all --prune; git reset --hard origin/main; bash deploy/install-aliyun-v2.sh'
+```
+
+如果是第一次在服务器上跑，也可以在仓库根目录直接执行：
+
+```bash
+sudo APP_DOMAIN=hw.example.com ENABLE_HTTPS=1 CERTBOT_EMAIL=you@example.com bash deploy/install-aliyun-v2.sh
+```
+
+脚本会完成这些事：
+
+- 更新 `/opt/homework-watcher-src` 到 `origin/main`。
+- 同步 v2 应用到 `/opt/homework-watcher-v2`。
+- 生成 `/etc/homework-watcher-v2.env`，写入 `APP_DOMAIN` 和 noVNC 公开地址。
+- 生成 Nginx 反向代理配置，`/` 代理到 `127.0.0.1:8080`，`/vnc/` 和 `/websockify` 代理到 noVNC。
+- 使用 Certbot 申请 Let's Encrypt 证书，并把 HTTP 自动跳转到 HTTPS。
+- 重启 `nginx` 和 `homework-watcher-v2`。
+- 把最终访问地址写到 `/root/homework-watcher-v2-deployment.txt`。
+
+部署后验证：
+
+```bash
+cat /root/homework-watcher-v2-deployment.txt
+systemctl status homework-watcher-v2 --no-pager
+systemctl status nginx --no-pager
+curl -I https://hw.example.com/health
+curl -fsS http://127.0.0.1:8080/health
+```
+
+证书续期由 Certbot 的 systemd timer 自动处理，可检查：
+
+```bash
+systemctl list-timers | grep certbot
+certbot renew --dry-run
+```
+
+如果 Certbot 失败，先检查三件事：DNS 是否解析到 `8.141.109.80`、安全组是否开放 `80/443`、域名是否已经完成备案接入。修好后重新运行同一条部署命令即可。
+
 脚本部署后可用：
 
 ```bash
