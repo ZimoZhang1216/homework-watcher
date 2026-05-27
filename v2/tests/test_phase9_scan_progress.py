@@ -8,6 +8,7 @@ from homework_watcher.app import (
     render_assignment_table,
     render_auth_panel,
     render_scan_guide,
+    render_scan_summary,
     render_page_script,
 )
 from homework_watcher.scan_progress import ScanCancelled, ScanProgressStore
@@ -117,6 +118,27 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("立即扫描", guide)
         self.assertIn("移动端", guide)
         self.assertIn("扫码登录", guide)
+
+    def test_scan_summary_surfaces_xiaoya_status_message(self) -> None:
+        class Result:
+            platform_summaries = {
+                "xiaoya": {
+                    "discovered_courses_count": 0,
+                    "merged_courses_count": 0,
+                    "scanned_courses_count": 0,
+                    "failed_courses_count": 0,
+                    "parsed_assignments_count": 0,
+                    "todo_count": 9,
+                    "message": "小雅本轮未发现可扫描课程，请确认登录态和课程页",
+                }
+            }
+
+        summary = render_scan_summary(Result())
+
+        self.assertIn("小雅最近扫描摘要", summary)
+        self.assertIn("小雅本轮未发现可扫描课程", summary)
+        self.assertIn("当前待办", summary)
+        self.assertIn(">9<", summary)
 
     def test_format_due_distance(self) -> None:
         self.assertEqual(

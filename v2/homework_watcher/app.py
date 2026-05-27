@@ -554,6 +554,8 @@ def render_scan_summary(result) -> str:
     summary = result.platform_summaries.get("xiaoya", {})
     if not summary:
         return ""
+    status_message = str(summary.get("message") or "").strip()
+    status_note = f'<p class="muted summary-note">{escape(status_message)}</p>' if status_message else ""
     fields = [
         ("自动发现课程", "discovered_courses_count"),
         ("待扫描课程", "merged_courses_count"),
@@ -572,6 +574,7 @@ def render_scan_summary(result) -> str:
         <h2>小雅最近扫描摘要</h2>
         <span class="count">{escape(str(summary.get("merged_courses_count", 0)))}</span>
       </div>
+      {status_note}
       <div class="summary-grid">{cells}</div>
     </section>
     """
@@ -809,6 +812,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     }}
     .error {{ color: var(--danger); font-weight: 800; }}
     .login-panel, .summary-panel {{ margin-top: 18px; }}
+    .summary-note {{ margin: 8px 0 0; }}
     .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 14px; margin-top: 14px; }}
     .summary-grid div {{ border: 1px solid var(--border); background: var(--surface-subtle); border-radius: 8px; padding: 12px; }}
     .summary-grid strong {{ display: block; margin-top: 4px; font-size: 24px; color: var(--primary); }}

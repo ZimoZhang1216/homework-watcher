@@ -282,13 +282,19 @@ class XiaoyaScanner:
             "parsed_assignments_count": 0,
             "todo_count": 0,
             "duplicates_count": 0,
+            "status": "pending",
+            "message": "",
         }
         if hasattr(context, "metadata"):
             context.metadata["xiaoya"] = summary
         if config is None or not config.enabled:
+            summary["status"] = "skipped"
+            summary["message"] = "小雅未启用或缺少平台配置"
             context.emit(5, "小雅：未启用，跳过")
             return []
         if not config.known_courses and not config.auto_discover_courses:
+            summary["status"] = "skipped"
+            summary["message"] = "小雅没有已知课程且未开启自动发现"
             context.emit(5, "小雅：没有可扫描课程且未开启自动发现，跳过")
             return []
 
@@ -340,9 +346,13 @@ class XiaoyaScanner:
                     emit=lambda message: context.emit(13, message),
                 )
                 if not merge.courses:
+                    summary["status"] = "skipped"
+                    summary["message"] = "小雅本轮未发现可扫描课程，请确认登录态和课程页"
                     context.emit(15, "小雅：没有可扫描课程，跳过")
                     return []
 
+                summary["status"] = "running"
+                summary["message"] = "小雅正在扫描课程任务页"
                 for index, course in enumerate(merge.courses, start=1):
                     percent = 15 + int(index / max(len(merge.courses), 1) * 70)
                     context.emit(
@@ -375,6 +385,8 @@ class XiaoyaScanner:
                             f"[xiaoya-task] failed course={course.course} skipped "
                             f"type={type(exc).__name__} message={exc}",
                         )
+                summary["status"] = "succeeded"
+                summary["message"] = f"小雅完成，识别 {len(results)} 条作业"
                 context.emit(88, f"小雅：完成，识别 {len(results)} 条")
                 return results
             finally:
