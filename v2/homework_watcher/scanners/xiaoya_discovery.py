@@ -599,6 +599,11 @@ def resolve_course_cards_by_clicking(
                 emit,
                 f"[xiaoya-click-discover] skipped reason=no_next_page list_page={list_page_no}",
             )
+            emit_discovery(
+                emit,
+                "[xiaoya-click-discover] pagination_state="
+                f"{sanitize_log_value(xiaoya_course_pagination_snapshot(page), limit=1200)}",
+            )
             break
 
     unique = dedupe_raw_course_candidates(resolved)
@@ -799,17 +804,89 @@ def click_xiaoya_course_page_number(page: Page, target_page_no: int) -> bool:
         f"li.ant-pagination-item-{target}",
         f"li[title='{target}']",
     ]
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
+    deadline = monotonic_time.monotonic() + CLICK_CANDIDATE_WAIT_MS / 1000
+    while monotonic_time.monotonic() < deadline:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.count() == 0:
+                    continue
+                locator.scroll_into_view_if_needed(timeout=1000)
+                box = locator.bounding_box(timeout=1000)
+                if box:
+                    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                else:
+                    locator.click(timeout=3000, force=True)
+                return True
+            except Exception:
                 continue
-            locator.scroll_into_view_if_needed(timeout=1000)
-            locator.click(timeout=3000, force=True)
+        if click_xiaoya_course_page_number_with_dom_events(page, target_page_no):
             return True
+        try:
+            page.wait_for_timeout(300)
         except Exception:
-            continue
+            break
     return False
+
+
+def click_xiaoya_course_page_number_with_dom_events(page: Page, target_page_no: int) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (targetPageNo) => {
+                  const target = String(targetPageNo);
+                  const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                  const visible = element => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const disabled = element => {
+                    const klass = String(element.className || '');
+                    return Boolean(element.disabled) ||
+                      element.getAttribute('aria-disabled') === 'true' ||
+                      klass.includes('disabled') ||
+                      klass.includes('is-disabled');
+                  };
+                  const selectors = [
+                    `.pagination_container .ant-pagination-item-${target}`,
+                    `.pagination_container li[title="${target}"]`,
+                    `.ant-pagination .ant-pagination-item-${target}`,
+                    `.ant-pagination li[title="${target}"]`,
+                    `li.ant-pagination-item-${target}`,
+                    `li[title="${target}"]`
+                  ];
+                  const element = selectors
+                    .flatMap(selector => Array.from(document.querySelectorAll(selector)))
+                    .find(node => visible(node) && !disabled(node));
+                  if (!element) return false;
+                  element.scrollIntoView({block: 'center', inline: 'center'});
+                  const rect = element.getBoundingClientRect();
+                  const x = rect.left + rect.width / 2;
+                  const y = rect.top + rect.height / 2;
+                  for (const type of ['pointerover', 'mouseover', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                    const EventClass = type.startsWith('pointer') && window.PointerEvent ? PointerEvent : MouseEvent;
+                    element.dispatchEvent(new EventClass(type, {
+                      bubbles: true,
+                      cancelable: true,
+                      clientX: x,
+                      clientY: y,
+                      pointerId: 1,
+                      pointerType: 'mouse',
+                      buttons: type.includes('down') ? 1 : 0,
+                    }));
+                  }
+                  if (compact(element.innerText || element.textContent || element.title) === target) return true;
+                  return true;
+                }
+                """,
+                int(target_page_no),
+            )
+        )
+    except Exception:
+        return False
 
 
 def wait_after_xiaoya_course_page_click(page: Page, previous_text: str) -> None:
@@ -825,6 +902,39 @@ def wait_after_xiaoya_course_page_click(page: Page, previous_text: str) -> None:
         page.wait_for_timeout(700)
     except Exception:
         pass
+
+
+def xiaoya_course_pagination_snapshot(page: Page) -> str:
+    try:
+        raw = page.evaluate(
+            """
+            () => JSON.stringify(
+              Array.from(document.querySelectorAll(
+                '.pagination_container, .ant-pagination, li[class*="pagination"], li[title], button,a,span,[role="button"]'
+              ))
+                .slice(0, 80)
+                .map((element, index) => ({
+                  index,
+                  tag: element.tagName,
+                  text: String(element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
+                  title: element.getAttribute('title') || '',
+                  aria: element.getAttribute('aria-label') || '',
+                  cls: String(element.className || '').slice(0, 140),
+                  visible: (() => {
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  })(),
+                }))
+                .filter(item => /pagination|上一页|下一页|^1$|^2$|page|prev|next/i.test(
+                  [item.text, item.title, item.aria, item.cls].join(' ')
+                ))
+            )
+            """
+        )
+    except Exception as exc:
+        return f"<failed type={type(exc).__name__} message={exc}>"
+    return str(raw or "[]")
 
 
 def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
