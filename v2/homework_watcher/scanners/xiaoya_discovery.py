@@ -668,6 +668,9 @@ def open_xiaoya_course_list_page(
 
 def click_next_xiaoya_course_list_page(page: Page, *, target_page_no: int | None = None) -> bool:
     previous_text = read_xiaoya_body_text(page)
+    if target_page_no and click_xiaoya_course_page_number(page, target_page_no):
+        wait_after_xiaoya_course_page_click(page, previous_text)
+        return True
     try:
         clicked = bool(
             page.evaluate(
@@ -780,18 +783,48 @@ def click_next_xiaoya_course_list_page(page: Page, *, target_page_no: int | None
         )
         if not clicked:
             return False
-        try:
-            page.wait_for_function(
-                "(oldText) => document.body && document.body.innerText !== oldText",
-                arg=previous_text,
-                timeout=5000,
-            )
-        except PlaywrightTimeoutError:
-            pass
-        page.wait_for_timeout(500)
+        wait_after_xiaoya_course_page_click(page, previous_text)
         return True
     except Exception:
         return False
+
+
+def click_xiaoya_course_page_number(page: Page, target_page_no: int) -> bool:
+    target = str(target_page_no)
+    selectors = [
+        f".pagination_container .ant-pagination-item-{target}",
+        f".pagination_container li[title='{target}']",
+        f".ant-pagination .ant-pagination-item-{target}",
+        f".ant-pagination li[title='{target}']",
+        f"li.ant-pagination-item-{target}",
+        f"li[title='{target}']",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            locator.scroll_into_view_if_needed(timeout=1000)
+            locator.click(timeout=3000, force=True)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def wait_after_xiaoya_course_page_click(page: Page, previous_text: str) -> None:
+    try:
+        page.wait_for_function(
+            "(oldText) => document.body && document.body.innerText !== oldText",
+            arg=previous_text,
+            timeout=5000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+    try:
+        page.wait_for_timeout(700)
+    except Exception:
+        pass
 
 
 def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
