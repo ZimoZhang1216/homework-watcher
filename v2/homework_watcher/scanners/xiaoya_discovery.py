@@ -80,7 +80,7 @@ MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 120
 DISCOVERY_LOAD_TIMEOUT_MS = 15000
 DISCOVERY_EXTRACT_TIMEOUT_MS = 15000
-CLICK_DISCOVERY_TIMEOUT_MS = 120000
+CLICK_DISCOVERY_STEP_TIMEOUT_MS = 60000
 CLICK_COURSE_TIMEOUT_MS = 8000
 CLICK_CANDIDATE_WAIT_MS = 6000
 DOM_COURSE_WAIT_MS = 6000
@@ -244,7 +244,7 @@ class XiaoyaCourseDiscoverer:
                 mycourse_url=url,
                 existing_course_ids=seen_course_ids,
                 seed_candidates=raw_candidates,
-                deadline=monotonic_time.monotonic() + CLICK_DISCOVERY_TIMEOUT_MS / 1000,
+                step_timeout_ms=CLICK_DISCOVERY_STEP_TIMEOUT_MS,
                 emit=emit,
             )
             if click_resolved_candidates:
@@ -297,7 +297,7 @@ def discover_xiaoya_courses_by_click_url(
         mycourse_url=mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL,
         existing_course_ids=set(),
         seed_candidates=[],
-        deadline=monotonic_time.monotonic() + CLICK_DISCOVERY_TIMEOUT_MS / 1000,
+        step_timeout_ms=CLICK_DISCOVERY_STEP_TIMEOUT_MS,
         emit=emit,
     )
     courses: list[KnownCourseConfig] = []
@@ -420,6 +420,14 @@ def remaining_deadline_ms(deadline: float | None) -> int:
     return max(0, int((deadline - monotonic_time.monotonic()) * 1000))
 
 
+def normalized_click_step_timeout_ms(step_timeout_ms: int) -> int:
+    return max(1000, step_timeout_ms)
+
+
+def click_step_deadline(step_timeout_ms: int = CLICK_DISCOVERY_STEP_TIMEOUT_MS) -> float:
+    return monotonic_time.monotonic() + normalized_click_step_timeout_ms(step_timeout_ms) / 1000
+
+
 def should_resolve_course_cards_by_click(
     raw_candidates: list[dict[str, Any]], *, discovered_count: int, expected_count: int
 ) -> bool:
@@ -444,7 +452,7 @@ def resolve_course_cards_by_clicking(
     mycourse_url: str,
     existing_course_ids: set[str],
     seed_candidates: list[dict[str, Any]] | None = None,
-    deadline: float | None = None,
+    step_timeout_ms: int = CLICK_DISCOVERY_STEP_TIMEOUT_MS,
     emit: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     resolved: list[dict[str, Any]] = []
@@ -457,14 +465,18 @@ def resolve_course_cards_by_clicking(
         if not emitted_start:
             emit_discovery(emit, "[xiaoya-click-discover] start")
             emitted_start = True
-        if deadline is not None and remaining_deadline_ms(deadline) <= 0:
-            emit_discovery(emit, "[xiaoya-click-discover] skipped reason=timeout")
-            break
-        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
-            emit_discovery(
-                emit,
-                f"[xiaoya-click-discover] skipped reason=open_list_failed list_page={list_page_no}",
-            )
+        open_deadline = click_step_deadline(step_timeout_ms)
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
+            if remaining_deadline_ms(open_deadline) <= 0:
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-click-discover] skipped reason=step_timeout step=open_list list_page={list_page_no}",
+                )
+            else:
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-click-discover] skipped reason=open_list_failed list_page={list_page_no}",
+                )
             break
 
         page_text = read_xiaoya_body_text(page)
@@ -479,7 +491,7 @@ def resolve_course_cards_by_clicking(
 
         cards = wait_for_xiaoya_click_course_candidates(
             page,
-            timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, remaining_deadline_ms(deadline)),
+            timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
             seed_candidates=seed_candidates if list_page_no == 1 else None,
         )
         emit_discovery(emit, f"[xiaoya-click-discover] candidate_count={len(cards)} list_page={list_page_no}")
@@ -489,20 +501,23 @@ def resolve_course_cards_by_clicking(
 
         page_available = True
         while True:
-            if deadline is not None and remaining_deadline_ms(deadline) <= 0:
-                emit_discovery(emit, "[xiaoya-click-discover] skipped reason=timeout")
+            open_deadline = click_step_deadline(step_timeout_ms)
+            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
                 page_available = False
-                break
-            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
-                page_available = False
-                emit_discovery(
-                    emit,
-                    f"[xiaoya-click-discover] skipped reason=return_list_failed list_page={list_page_no}",
-                )
+                if remaining_deadline_ms(open_deadline) <= 0:
+                    emit_discovery(
+                        emit,
+                        f"[xiaoya-click-discover] skipped reason=step_timeout step=return_list list_page={list_page_no}",
+                    )
+                else:
+                    emit_discovery(
+                        emit,
+                        f"[xiaoya-click-discover] skipped reason=return_list_failed list_page={list_page_no}",
+                    )
                 break
             cards = wait_for_xiaoya_click_course_candidates(
                 page,
-                timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, remaining_deadline_ms(deadline)),
+                timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
                 seed_candidates=seed_candidates if list_page_no == 1 else None,
             )
             card = next_unattempted_click_card(cards, attempted_names)
@@ -555,9 +570,7 @@ def resolve_course_cards_by_clicking(
                 continue
             course_id = wait_for_course_id_after_click(
                 page,
-                timeout_ms=min(CLICK_COURSE_TIMEOUT_MS, remaining_deadline_ms(deadline))
-                if deadline is not None
-                else CLICK_COURSE_TIMEOUT_MS,
+                timeout_ms=min(CLICK_COURSE_TIMEOUT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
                 before_url=before_url,
             )
             after_url = str(getattr(page, "url", "") or "")
@@ -592,7 +605,13 @@ def resolve_course_cards_by_clicking(
 
         if not page_available:
             break
-        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
+        open_deadline = click_step_deadline(step_timeout_ms)
+        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
+            if remaining_deadline_ms(open_deadline) <= 0:
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-click-discover] skipped reason=step_timeout step=return_list list_page={list_page_no}",
+                )
             break
         if not click_next_xiaoya_course_list_page(page, target_page_no=list_page_no + 1):
             emit_discovery(

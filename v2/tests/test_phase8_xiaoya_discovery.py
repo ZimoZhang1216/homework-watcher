@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+import homework_watcher.scanners.xiaoya_discovery as xiaoya_discovery
 from homework_watcher.config_loader import KnownCourseConfig, parse_platform_config
 from homework_watcher.scanners.xiaoya_discovery import (
+    CLICK_DISCOVERY_STEP_TIMEOUT_MS,
     build_xiaoya_task_url,
+    click_step_deadline,
     click_url_course_to_raw_candidate,
     collect_xiaoya_network_payload,
     course_name_candidates,
@@ -20,6 +24,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     normalize_discovered_xiaoya_course,
     raw_course_candidates_from_network_payloads,
     has_clickable_course_signal,
+    resolve_course_cards_by_clicking,
     should_resolve_course_cards_by_click,
 )
 
@@ -532,6 +537,51 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
                 expected_count=14,
             )
         )
+
+    def test_click_step_deadline_uses_one_minute_window(self) -> None:
+        self.assertEqual(CLICK_DISCOVERY_STEP_TIMEOUT_MS, 60_000)
+        with patch.object(xiaoya_discovery.monotonic_time, "monotonic", return_value=100.0):
+            self.assertEqual(click_step_deadline(), 160.0)
+
+    def test_click_discovery_refreshes_deadline_between_page_actions(self) -> None:
+        page = object()
+        deadlines: list[float] = []
+        emitted: list[str] = []
+        card = {
+            "href": "",
+            "absolute_href": "",
+            "text": "2026年春 校内公开 教务开课 结构化学 学院：化学学院",
+            "attrs": "data-id=6902426124991620398",
+            "ancestor_texts": [],
+            "ancestor_attrs": [],
+            "title_texts": ["结构化学"],
+        }
+
+        def fake_open(_page, _url, *, page_no: int, deadline: float | None = None) -> bool:
+            self.assertEqual(page_no, 1)
+            self.assertIsNotNone(deadline)
+            deadlines.append(float(deadline))
+            return True
+
+        with (
+            patch.object(xiaoya_discovery, "click_step_deadline", side_effect=[101.0, 202.0, 303.0, 404.0]),
+            patch.object(xiaoya_discovery, "open_xiaoya_course_list_page", side_effect=fake_open),
+            patch.object(xiaoya_discovery, "read_xiaoya_body_text", return_value="page-one"),
+            patch.object(xiaoya_discovery, "wait_for_xiaoya_click_course_candidates", return_value=[card]),
+            patch.object(xiaoya_discovery, "click_next_xiaoya_course_list_page", return_value=False),
+            patch.object(xiaoya_discovery, "xiaoya_course_pagination_snapshot", return_value="no next"),
+        ):
+            courses = resolve_course_cards_by_clicking(
+                page,
+                mycourse_url="https://nankai.ai-augmented.com/app/jx-web/mycourse",
+                existing_course_ids=set(),
+                emit=emitted.append,
+            )
+
+        self.assertEqual(deadlines, [101.0, 202.0, 303.0, 404.0])
+        self.assertEqual(len(courses), 1)
+        self.assertEqual(extract_course_id_from_raw(courses[0]), "6902426124991620398")
+        self.assertFalse(any("reason=timeout" in message for message in emitted))
 
     def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
         config = parse_platform_config(
