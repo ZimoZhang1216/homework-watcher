@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser = subparsers.add_parser("scan", help="执行统一扫描服务")
     scan_parser.add_argument("--platform", action="append", dest="platforms", help="限制扫描平台，可重复")
     scan_parser.add_argument("--user", default="default", help="账号学号，默认 default")
+    scan_parser.add_argument("--progress-jsonl", action="store_true", help="逐行输出扫描进度 JSON")
     scan_parser.set_defaults(handler=cmd_scan)
 
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
@@ -95,8 +96,25 @@ def cmd_db_list(args) -> int:
 
 def cmd_scan(args) -> int:
     settings = load_settings()
-    result = ScanService(settings, user_key=args.user).run_scan(platforms=args.platforms)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    def emit_progress(percent: int, message: str) -> None:
+        if args.progress_jsonl:
+            print(
+                json.dumps(
+                    {"type": "progress", "percent": percent, "message": message},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+
+    result = ScanService(settings, user_key=args.user).run_scan(
+        platforms=args.platforms,
+        progress=emit_progress if args.progress_jsonl else None,
+    )
+    payload = result.to_dict()
+    if args.progress_jsonl:
+        print(json.dumps({"type": "result", "result": payload}, ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if not result.errors else 1
 
 

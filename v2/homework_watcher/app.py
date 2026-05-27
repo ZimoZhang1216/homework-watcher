@@ -25,8 +25,9 @@ from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
 from .remote_login import RemoteLoginManager, build_novnc_url
 from .scan_progress import ScanCancelled, ScanProgressStore
-from .scan_service import ScanService, latest_scan_result
+from .scan_service import latest_scan_result
 from .settings import load_settings
+from .web_scan import ServerScanCommandError, run_server_scan_command
 
 
 LOGIN_PATH = "/login"
@@ -58,7 +59,7 @@ def create_app() -> FastAPI:
         with session_factory() as session:
             todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=user.username)]
         login_status = login_manager.status(user.username)
-        latest_result = latest_scan_result(user.username)
+        latest_result = latest_scan_result(user.username) or scan_progress.get(user.username).result
         return HTMLResponse(
             render_page(
                 "当前待办",
@@ -142,10 +143,15 @@ def create_app() -> FastAPI:
         user = current_user_from_request(request, session_factory, settings)
         if user is None:
             return RedirectResponse(LOGIN_PATH, status_code=303) if redirect else login_required_json()
-        result = ScanService(settings, user_key=user.username).run_scan()
+        try:
+            result = run_server_scan_command(settings, owner_key=user.username)
+        except ServerScanCommandError as exc:
+            if redirect:
+                return RedirectResponse("/", status_code=303)
+            return JSONResponse({"error": str(exc), "result": exc.result}, status_code=500)
         if redirect:
             return RedirectResponse("/", status_code=303)
-        return result.to_dict()
+        return result
 
     @app.post("/api/scan/start")
     def api_scan_start(request: Request):
@@ -162,11 +168,18 @@ def create_app() -> FastAPI:
                     scan_progress.raise_if_cancelled(owner_key, scan_id)
                     scan_progress.update(owner_key, scan_id, percent, message)
 
-                result = ScanService(settings, user_key=owner_key).run_scan(progress=emit_progress)
+                result = run_server_scan_command(
+                    settings,
+                    owner_key=owner_key,
+                    emit=emit_progress,
+                    check_cancelled=lambda: scan_progress.raise_if_cancelled(owner_key, scan_id),
+                )
                 scan_progress.raise_if_cancelled(owner_key, scan_id)
-                scan_progress.finish_success(owner_key, scan_id, result.to_dict())
+                scan_progress.finish_success(owner_key, scan_id, result)
             except ScanCancelled:
                 scan_progress.finish_cancelled(owner_key, scan_id)
+            except ServerScanCommandError as exc:
+                scan_progress.finish_failed(owner_key, scan_id, str(exc))
             except Exception as exc:  # noqa: BLE001 - keep the web progress endpoint alive.
                 scan_progress.finish_failed(owner_key, scan_id, f"{type(exc).__name__}: {exc}")
 
@@ -232,7 +245,10 @@ def create_app() -> FastAPI:
         if user is None:
             return login_required_json()
         result = latest_scan_result(user.username)
-        return result.to_dict() if result else {"scan": None}
+        if result:
+            return result.to_dict()
+        progress = scan_progress.get(user.username)
+        return progress.result if progress.result else {"scan": None}
 
     @app.get("/assignments", response_class=HTMLResponse)
     def assignments_page(request: Request):
@@ -551,7 +567,7 @@ def render_scan_guide() -> str:
 def render_scan_summary(result) -> str:
     if result is None:
         return ""
-    summary = result.platform_summaries.get("xiaoya", {})
+    summary = platform_summaries_from_scan_result(result).get("xiaoya", {})
     if not summary:
         return ""
     status_message = str(summary.get("message") or "").strip()
@@ -578,6 +594,14 @@ def render_scan_summary(result) -> str:
       <div class="summary-grid">{cells}</div>
     </section>
     """
+
+
+def platform_summaries_from_scan_result(result) -> dict[str, dict[str, object]]:
+    if isinstance(result, dict):
+        value = result.get("platform_summaries") or {}
+    else:
+        value = getattr(result, "platform_summaries", {}) or {}
+    return value if isinstance(value, dict) else {}
 
 
 def render_assignment_table(assignments: list[dict[str, object]]) -> str:

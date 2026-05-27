@@ -12,6 +12,11 @@ from homework_watcher.app import (
     render_page_script,
 )
 from homework_watcher.scan_progress import ScanCancelled, ScanProgressStore
+from homework_watcher.web_scan import (
+    extract_scan_result_from_stdout,
+    parse_progress_jsonl_line,
+    server_scan_command_args,
+)
 
 
 class Phase9ScanProgressTests(unittest.TestCase):
@@ -139,6 +144,61 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("小雅本轮未发现可扫描课程", summary)
         self.assertIn("当前待办", summary)
         self.assertIn(">9<", summary)
+
+    def test_scan_summary_accepts_cli_result_dict(self) -> None:
+        summary = render_scan_summary(
+            {
+                "scan_id": "scan-test",
+                "todos": [{"title": "作业-08"}],
+                "platform_summaries": {
+                    "xiaoya": {
+                        "discovered_courses_count": 6,
+                        "merged_courses_count": 8,
+                        "scanned_courses_count": 8,
+                        "failed_courses_count": 0,
+                        "parsed_assignments_count": 12,
+                        "todo_count": 9,
+                        "message": "小雅：扫描完成",
+                    }
+                },
+            }
+        )
+
+        self.assertIn("小雅最近扫描摘要", summary)
+        self.assertIn("小雅：扫描完成", summary)
+        self.assertIn(">8<", summary)
+        self.assertIn(">12<", summary)
+
+    def test_web_scan_parses_cli_progress_jsonl(self) -> None:
+        line = '{"type":"progress","percent":37,"message":"小雅：扫描课程 结构化学"}'
+
+        self.assertEqual(parse_progress_jsonl_line(line), (37, "小雅：扫描课程 结构化学"))
+
+    def test_web_scan_extracts_cli_result_jsonl(self) -> None:
+        stdout = "\n".join(
+            [
+                '{"type":"progress","percent":20,"message":"小雅：任务页"}',
+                (
+                    '{"type":"result","result":{"scan_id":"scan-test",'
+                    '"todos":[{"title":"作业-08"}],"platform_summaries":{}}}'
+                ),
+            ]
+        )
+
+        result = extract_scan_result_from_stdout(stdout)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["scan_id"], "scan-test")
+        self.assertEqual(result["todos"][0]["title"], "作业-08")
+
+    def test_server_scan_command_uses_cli_scan_with_progress_jsonl(self) -> None:
+        args = server_scan_command_args("default", progress_jsonl=True)
+
+        self.assertIn("homework_watcher.cli", args)
+        self.assertIn("scan", args)
+        self.assertIn("--user", args)
+        self.assertIn("default", args)
+        self.assertIn("--progress-jsonl", args)
 
     def test_format_due_distance(self) -> None:
         self.assertEqual(
