@@ -44,3 +44,24 @@ class Assignment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     raw_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class PlatformCourse(Base):
+    __tablename__ = "platform_courses"
+    __table_args__ = (
+        UniqueConstraint("owner_key", "platform_key", "course_id", name="uq_platform_course_owner_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_key: Mapped[str] = mapped_column(String(120), nullable=False, default="default", index=True)
+    platform_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    platform_label: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    course: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    course_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    task_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(80), nullable=False, default="discovered")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

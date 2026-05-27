@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from dataclasses import replace
+from datetime import datetime
 
 from .config_loader import load_platform_configs
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
@@ -29,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     scan_parser.add_argument("--progress-jsonl", action="store_true", help="逐行输出扫描进度 JSON")
     scan_parser.set_defaults(handler=cmd_scan)
+
+    scan_courses_parser = subparsers.add_parser("scan-courses", help="扫描并缓存平台课程")
+    scan_courses_parser.add_argument("--platform", action="append", dest="platforms", help="限制扫描平台，可重复")
+    scan_courses_parser.add_argument("--user", default="default", help="账号学号，默认 default")
+    scan_courses_parser.add_argument("--progress-jsonl", action="store_true", help="逐行输出扫描进度 JSON")
+    scan_courses_parser.set_defaults(handler=cmd_scan_courses)
 
     login_xiaoya_parser = subparsers.add_parser("login-xiaoya", help="打开小雅登录浏览器并保存登录态")
     login_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
@@ -118,6 +126,99 @@ def cmd_scan(args) -> int:
     return 0 if not result.errors else 1
 
 
+def cmd_scan_courses(args) -> int:
+    settings = load_settings()
+    init_db(settings)
+    scan_id = f"course-scan-{uuid.uuid4().hex[:12]}"
+    started_at = datetime.now()
+
+    def emit_progress(percent: int, message: str) -> None:
+        if args.progress_jsonl:
+            print(
+                json.dumps(
+                    {"type": "progress", "percent": percent, "message": message},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+
+    def emit_stage(percent: int, message: str) -> None:
+        emit_progress(percent, message)
+
+    configs = load_platform_configs(settings.config_path)
+    requested_platforms = args.platforms or ["xiaoya"]
+    platform_summaries: dict[str, dict[str, object]] = {}
+    courses: list[dict[str, object]] = []
+    errors: list[str] = []
+
+    for platform in requested_platforms:
+        if platform != "xiaoya":
+            message = f"{platform}: 暂不支持课程缓存扫描"
+            errors.append(message)
+            platform_summaries[platform] = {
+                "platform_label": platform,
+                "status": "skipped",
+                "message": message,
+            }
+            emit_stage(5, message)
+            continue
+
+        emit_stage(5, "小雅：准备扫描课程")
+        try:
+            rows, summary, _stats = XiaoyaScanner(settings).discover_and_cache_courses(
+                configs.get("xiaoya"),
+                user_key=args.user,
+                scan_id=scan_id,
+                emit=lambda message: emit_stage(course_scan_progress_percent(message), message),
+            )
+            courses.extend(rows)
+            platform_summaries["xiaoya"] = summary
+            if summary.get("status") == "failed":
+                errors.append(str(summary.get("message") or "小雅课程扫描失败"))
+            emit_stage(95, str(summary.get("message") or "小雅课程扫描完成"))
+        except Exception as exc:  # noqa: BLE001 - keep JSON result parseable for web UI.
+            message = f"xiaoya: {type(exc).__name__}: {exc}"
+            errors.append(message)
+            platform_summaries["xiaoya"] = {
+                "platform_label": "小雅",
+                "status": "failed",
+                "message": message,
+            }
+            emit_stage(95, message)
+
+    payload = {
+        "scan_id": scan_id,
+        "mode": "courses",
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "owner_key": args.user,
+        "courses": courses,
+        "errors": errors,
+        "platform_summaries": platform_summaries,
+    }
+    if args.progress_jsonl:
+        print(json.dumps({"type": "result", "result": payload}, ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if not errors else 1
+
+
+def course_scan_progress_percent(message: str) -> int:
+    if "开始" in message or "start url" in message:
+        return 15
+    if "loaded current_url" in message:
+        return 25
+    if "raw_candidate_count" in message or "network course candidates" in message:
+        return 40
+    if "xiaoya-click-discover" in message:
+        return 60
+    if "discovered_count" in message:
+        return 75
+    if "课程扫描完成" in message or "未发现可保存课程" in message:
+        return 90
+    return 30
+
+
 def cmd_login_xiaoya(args) -> int:
     login_xiaoya(load_settings(), user_key=args.user)
     return 0
@@ -173,6 +274,12 @@ def run_xiaoya_scan_diagnostic(args) -> int:
     config = service.configs.get("xiaoya")
     if config is not None:
         service.configs["xiaoya"] = replace(config, enabled=True, auto_discover_courses=True)
+        XiaoyaScanner(settings).discover_and_cache_courses(
+            service.configs["xiaoya"],
+            user_key=args.user,
+            scan_id="diagnose-xiaoya",
+            emit=print,
+        )
     result = service.run_scan(platforms=["xiaoya"])
     init_db(settings)
     session_factory = create_session_factory(settings)

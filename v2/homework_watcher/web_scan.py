@@ -29,8 +29,14 @@ class ServerScanCommandError(RuntimeError):
         return f"{self.message} exit={self.returncode}{suffix}"
 
 
-def server_scan_command_args(owner_key: str, *, progress_jsonl: bool = False) -> list[str]:
-    args = [sys.executable, "-m", "homework_watcher.cli", "scan", "--user", owner_key]
+def server_scan_command_args(
+    owner_key: str,
+    *,
+    progress_jsonl: bool = False,
+    mode: str = "tasks",
+) -> list[str]:
+    command = "scan-courses" if mode == "courses" else "scan"
+    args = [sys.executable, "-m", "homework_watcher.cli", command, "--user", owner_key]
     if progress_jsonl:
         args.append("--progress-jsonl")
     return args
@@ -40,10 +46,11 @@ def run_server_scan_command(
     settings: Settings,
     *,
     owner_key: str,
+    mode: str = "tasks",
     emit: Callable[[int, str], None] | None = None,
     check_cancelled: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    args = server_scan_command_args(owner_key, progress_jsonl=True)
+    args = server_scan_command_args(owner_key, progress_jsonl=True, mode=mode)
     env = scan_command_env(settings)
     process = subprocess.Popen(
         args,
@@ -155,7 +162,7 @@ def extract_scan_result_from_stdout(stdout: str) -> dict[str, Any] | None:
 
 
 def is_scan_result_dict(value: object) -> bool:
-    return isinstance(value, dict) and "scan_id" in value and "todos" in value
+    return isinstance(value, dict) and "scan_id" in value and ("todos" in value or "courses" in value)
 
 
 def parse_progress_jsonl_line(line: str) -> tuple[int, str] | None:

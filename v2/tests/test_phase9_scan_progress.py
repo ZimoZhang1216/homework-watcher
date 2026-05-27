@@ -47,6 +47,16 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertEqual(finished.percent, 100)
         self.assertIn("当前待办 1 条", finished.message)
 
+    def test_progress_store_reports_course_scan_success(self) -> None:
+        store = ScanProgressStore()
+        started, _created = store.start("alice")
+
+        store.finish_success("alice", started.scan_id, {"mode": "courses", "courses": [{"course": "结构化学"}]})
+
+        finished = store.get("alice")
+        self.assertEqual(finished.status, "succeeded")
+        self.assertIn("保存 1 门课程", finished.message)
+
     def test_progress_store_is_owner_scoped(self) -> None:
         store = ScanProgressStore()
         alice, _ = store.start("alice")
@@ -88,6 +98,8 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn('fetch(panel.dataset.cancelUrl', script)
         self.assertIn('cancelled: "已强制结束"', script)
         self.assertIn("if (!panel) return;", script)
+        self.assertIn('querySelectorAll("form[data-scan-start-url]")', script)
+        self.assertIn("form.dataset.scanStartUrl", script)
 
     def test_assignment_table_uses_due_distance_column(self) -> None:
         table = render_assignment_table(
@@ -120,7 +132,8 @@ class Phase9ScanProgressTests(unittest.TestCase):
 
         self.assertIn("登录本站", guide)
         self.assertIn("授权平台", guide)
-        self.assertIn("立即扫描", guide)
+        self.assertIn("扫描课程", guide)
+        self.assertIn("扫描任务", guide)
         self.assertIn("移动端", guide)
         self.assertIn("扫码登录", guide)
 
@@ -153,6 +166,7 @@ class Phase9ScanProgressTests(unittest.TestCase):
                 "platform_summaries": {
                     "xiaoya": {
                         "discovered_courses_count": 6,
+                        "cached_courses_count": 8,
                         "merged_courses_count": 8,
                         "scanned_courses_count": 8,
                         "failed_courses_count": 0,
@@ -191,11 +205,37 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertEqual(result["scan_id"], "scan-test")
         self.assertEqual(result["todos"][0]["title"], "作业-08")
 
+    def test_web_scan_extracts_course_result_jsonl(self) -> None:
+        stdout = "\n".join(
+            [
+                '{"type":"progress","percent":20,"message":"小雅：扫描课程"}',
+                (
+                    '{"type":"result","result":{"scan_id":"course-scan-test",'
+                    '"mode":"courses","courses":[{"course":"结构化学"}],"platform_summaries":{}}}'
+                ),
+            ]
+        )
+
+        result = extract_scan_result_from_stdout(stdout)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["scan_id"], "course-scan-test")
+        self.assertEqual(result["courses"][0]["course"], "结构化学")
+
     def test_server_scan_command_uses_cli_scan_with_progress_jsonl(self) -> None:
         args = server_scan_command_args("default", progress_jsonl=True)
 
         self.assertIn("homework_watcher.cli", args)
         self.assertIn("scan", args)
+        self.assertIn("--user", args)
+        self.assertIn("default", args)
+        self.assertIn("--progress-jsonl", args)
+
+    def test_server_scan_command_can_use_course_scan_mode(self) -> None:
+        args = server_scan_command_args("default", progress_jsonl=True, mode="courses")
+
+        self.assertIn("homework_watcher.cli", args)
+        self.assertIn("scan-courses", args)
         self.assertIn("--user", args)
         self.assertIn("default", args)
         self.assertIn("--progress-jsonl", args)

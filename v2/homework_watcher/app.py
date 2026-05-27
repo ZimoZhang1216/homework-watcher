@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
         with session_factory() as session:
             todos = [assignment_to_dict(item) for item in list_todos(session, owner_key=user.username)]
         login_status = login_manager.status(user.username)
-        latest_result = latest_scan_result(user.username) or scan_progress.get(user.username).result
+        latest_result = scan_progress.get(user.username).result or latest_scan_result(user.username)
         return HTMLResponse(
             render_page(
                 "当前待办",
@@ -69,12 +69,15 @@ def create_app() -> FastAPI:
                     <h2>当前待办</h2>
                     <span class="count">{len(todos)}</span>
                   </div>
-                  <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。点击“立即扫描”会读取已登录平台的作业列表，不会提交或修改平台内容。</p>
+                  <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。先用“扫描课程”保存小雅课程列表，再用“扫描任务”读取已登录平台的作业列表。</p>
                   {render_scan_guide()}
                   {render_assignment_table(todos)}
                   <div class="actions">
-                    <form method="post" action="/scan?redirect=1" id="scan-form">
-                      <button type="submit" id="scan-button">立即扫描</button>
+                    <form method="post" action="/scan?redirect=1" class="scan-form" data-scan-start-url="/api/scan/start">
+                      <button type="submit" class="scan-action-button">扫描任务</button>
+                    </form>
+                    <form method="post" action="/courses/scan?redirect=1" class="scan-form" data-scan-start-url="/api/courses/scan/start">
+                      <button type="submit" class="secondary scan-action-button">扫描课程</button>
                     </form>
                     <a class="button-link" href="/logs/latest">查看最近扫描日志</a>
                     <a class="button-link" href="/assignments">查看所有记录</a>
@@ -144,7 +147,22 @@ def create_app() -> FastAPI:
         if user is None:
             return RedirectResponse(LOGIN_PATH, status_code=303) if redirect else login_required_json()
         try:
-            result = run_server_scan_command(settings, owner_key=user.username)
+            result = run_server_scan_command(settings, owner_key=user.username, mode="tasks")
+        except ServerScanCommandError as exc:
+            if redirect:
+                return RedirectResponse("/", status_code=303)
+            return JSONResponse({"error": str(exc), "result": exc.result}, status_code=500)
+        if redirect:
+            return RedirectResponse("/", status_code=303)
+        return result
+
+    @app.post("/courses/scan")
+    def scan_courses(request: Request, redirect: bool = Query(False)):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return RedirectResponse(LOGIN_PATH, status_code=303) if redirect else login_required_json()
+        try:
+            result = run_server_scan_command(settings, owner_key=user.username, mode="courses")
         except ServerScanCommandError as exc:
             if redirect:
                 return RedirectResponse("/", status_code=303)
@@ -158,39 +176,50 @@ def create_app() -> FastAPI:
         user = current_user_from_request(request, session_factory, settings)
         if user is None:
             return login_required_json()
-        snapshot, started = scan_progress.start(user.username)
-        if not started:
-            return snapshot.to_dict()
+        return start_background_scan(user.username, mode="tasks").to_dict()
 
-        def run_scan_job(owner_key: str, scan_id: str) -> None:
+    @app.post("/api/courses/scan/start")
+    def api_courses_scan_start(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return login_required_json()
+        return start_background_scan(user.username, mode="courses").to_dict()
+
+    def start_background_scan(owner_key: str, *, mode: str):
+        snapshot, started = scan_progress.start(owner_key)
+        if not started:
+            return snapshot
+
+        def run_scan_job(active_owner_key: str, scan_id: str, active_mode: str) -> None:
             try:
                 def emit_progress(percent: int, message: str) -> None:
-                    scan_progress.raise_if_cancelled(owner_key, scan_id)
-                    scan_progress.update(owner_key, scan_id, percent, message)
+                    scan_progress.raise_if_cancelled(active_owner_key, scan_id)
+                    scan_progress.update(active_owner_key, scan_id, percent, message)
 
                 result = run_server_scan_command(
                     settings,
-                    owner_key=owner_key,
+                    owner_key=active_owner_key,
+                    mode=active_mode,
                     emit=emit_progress,
-                    check_cancelled=lambda: scan_progress.raise_if_cancelled(owner_key, scan_id),
+                    check_cancelled=lambda: scan_progress.raise_if_cancelled(active_owner_key, scan_id),
                 )
-                scan_progress.raise_if_cancelled(owner_key, scan_id)
-                scan_progress.finish_success(owner_key, scan_id, result)
+                scan_progress.raise_if_cancelled(active_owner_key, scan_id)
+                scan_progress.finish_success(active_owner_key, scan_id, result)
             except ScanCancelled:
-                scan_progress.finish_cancelled(owner_key, scan_id)
+                scan_progress.finish_cancelled(active_owner_key, scan_id)
             except ServerScanCommandError as exc:
-                scan_progress.finish_failed(owner_key, scan_id, str(exc))
+                scan_progress.finish_failed(active_owner_key, scan_id, str(exc))
             except Exception as exc:  # noqa: BLE001 - keep the web progress endpoint alive.
-                scan_progress.finish_failed(owner_key, scan_id, f"{type(exc).__name__}: {exc}")
+                scan_progress.finish_failed(active_owner_key, scan_id, f"{type(exc).__name__}: {exc}")
 
         thread = threading.Thread(
             target=run_scan_job,
-            args=(user.username, snapshot.scan_id),
-            name=f"scan-{user.username}",
+            args=(owner_key, snapshot.scan_id, mode),
+            name=f"{mode}-scan-{owner_key}",
             daemon=True,
         )
         thread.start()
-        return scan_progress.get(user.username).to_dict()
+        return scan_progress.get(owner_key)
 
     @app.post("/api/scan/cancel")
     def api_scan_cancel(request: Request):
@@ -244,11 +273,11 @@ def create_app() -> FastAPI:
         user = current_user_from_request(request, session_factory, settings)
         if user is None:
             return login_required_json()
-        result = latest_scan_result(user.username)
-        if result:
-            return result.to_dict()
         progress = scan_progress.get(user.username)
-        return progress.result if progress.result else {"scan": None}
+        if progress.result:
+            return progress.result
+        result = latest_scan_result(user.username)
+        return result.to_dict() if result else {"scan": None}
 
     @app.get("/assignments", response_class=HTMLResponse)
     def assignments_page(request: Request):
@@ -554,7 +583,7 @@ def render_scan_guide() -> str:
       </div>
       <div class="guide-step">
         <span class="guide-index">3</span>
-        <div><strong>开始扫描</strong><span>回到待办页点击“立即扫描”，等待进度条完成。</span></div>
+        <div><strong>开始扫描</strong><span>课程有变化时先点“扫描课程”；平时点“扫描任务”，等待进度条完成。</span></div>
       </div>
       <div class="guide-step">
         <span class="guide-index">4</span>
@@ -573,7 +602,8 @@ def render_scan_summary(result) -> str:
     status_message = str(summary.get("message") or "").strip()
     status_note = f'<p class="muted summary-note">{escape(status_message)}</p>' if status_message else ""
     fields = [
-        ("自动发现课程", "discovered_courses_count"),
+        ("已保存课程", "cached_courses_count"),
+        ("本次发现课程", "discovered_courses_count"),
         ("待扫描课程", "merged_courses_count"),
         ("已扫描课程", "scanned_courses_count"),
         ("失败课程", "failed_courses_count"),
@@ -588,12 +618,21 @@ def render_scan_summary(result) -> str:
     <section class="panel summary-panel">
       <div class="panel-title">
         <h2>小雅最近扫描摘要</h2>
-        <span class="count">{escape(str(summary.get("merged_courses_count", 0)))}</span>
+        <span class="count">{escape(str(summary_count(summary)))}</span>
       </div>
       {status_note}
       <div class="summary-grid">{cells}</div>
     </section>
     """
+
+
+def summary_count(summary: dict[str, object]) -> object:
+    return (
+        summary.get("saved_courses_count")
+        or summary.get("cached_courses_count")
+        or summary.get("merged_courses_count")
+        or 0
+    )
 
 
 def platform_summaries_from_scan_result(result) -> dict[str, dict[str, object]]:
@@ -955,11 +994,11 @@ def render_page_script() -> str:
     return """
   <script>
     (() => {
-      const form = document.getElementById("scan-form");
+      const forms = Array.from(document.querySelectorAll("form[data-scan-start-url]"));
       const panel = document.getElementById("scan-progress");
       if (!panel) return;
 
-      const button = document.getElementById("scan-button");
+      const buttons = forms.flatMap((form) => Array.from(form.querySelectorAll("button")));
       const cancelButton = document.getElementById("scan-cancel-button");
       const fill = document.getElementById("scan-progress-fill");
       const percentText = document.getElementById("scan-progress-percent");
@@ -969,6 +1008,17 @@ def render_page_script() -> str:
       let pollTimer = null;
       let reloadTimer = null;
       let sawRunningScan = false;
+
+      buttons.forEach((button) => {
+        button.dataset.originalText = button.textContent;
+      });
+
+      const setScanButtons = (running) => {
+        buttons.forEach((button) => {
+          button.disabled = running;
+          button.textContent = running ? "扫描中" : (button.dataset.originalText || "扫描");
+        });
+      };
 
       const setProgress = (snapshot) => {
         const percent = Math.max(0, Math.min(100, Number(snapshot.percent || 0)));
@@ -984,10 +1034,7 @@ def render_page_script() -> str:
           cancelled: "已强制结束"
         };
         statusText.textContent = labels[snapshot.status] || "扫描状态";
-        if (button) {
-          button.disabled = snapshot.status === "running";
-          button.textContent = snapshot.status === "running" ? "扫描中" : "立即扫描";
-        }
+        setScanButtons(snapshot.status === "running");
         if (cancelButton) {
           cancelButton.disabled = snapshot.status !== "running";
           cancelButton.textContent = "强制结束";
@@ -1030,7 +1077,7 @@ def render_page_script() -> str:
           stopPolling();
           statusText.textContent = "扫描状态不可用";
           messageText.textContent = "无法读取扫描进度。";
-          if (button) button.disabled = false;
+          setScanButtons(false);
         }
       };
 
@@ -1040,13 +1087,14 @@ def render_page_script() -> str:
         pollTimer = window.setInterval(pollProgress, 1000);
       };
 
-      if (form) {
+      if (forms.length) {
+        forms.forEach((form) => {
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
-          if (button) button.disabled = true;
+          setScanButtons(true);
           sawRunningScan = true;
           try {
-            const response = await fetch(panel.dataset.startUrl, {
+            const response = await fetch(form.dataset.scanStartUrl, {
               method: "POST",
               credentials: "same-origin"
             });
@@ -1061,8 +1109,9 @@ def render_page_script() -> str:
             sawRunningScan = false;
             statusText.textContent = "启动失败";
             messageText.textContent = "无法启动扫描。";
-            if (button) button.disabled = false;
+            setScanButtons(false);
           }
+        });
         });
       }
 

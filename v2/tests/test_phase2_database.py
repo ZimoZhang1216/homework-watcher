@@ -8,7 +8,17 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 from homework_watcher.candidates import AssignmentCandidate
-from homework_watcher.database import create_session_factory, init_db, list_assignments, list_todos, upsert_assignments
+from homework_watcher.config_loader import KnownCourseConfig
+from homework_watcher.database import (
+    create_session_factory,
+    init_db,
+    list_assignments,
+    list_platform_courses,
+    list_todos,
+    platform_course_to_known_course,
+    upsert_assignments,
+    upsert_platform_courses,
+)
 from homework_watcher.settings import Settings
 from homework_watcher.status import normalize_status
 
@@ -184,6 +194,57 @@ class Phase2DatabaseTests(unittest.TestCase):
             session_factory = create_session_factory(settings)
             with session_factory() as session:
                 self.assertEqual([item.owner_key for item in list_assignments(session)], ["default"])
+
+    def test_platform_courses_are_owner_scoped_and_upserted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = test_settings(f"sqlite:///{Path(tmpdir) / 'homework.sqlite3'}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+            course = KnownCourseConfig(
+                course="结构化学",
+                course_id="6902426124991620398",
+                task_url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+                source="click_url",
+            )
+
+            with session_factory() as session:
+                alice = upsert_platform_courses(
+                    session,
+                    [course],
+                    owner_key="alice",
+                    platform_key="xiaoya",
+                    platform_label="小雅",
+                )
+                bob = upsert_platform_courses(
+                    session,
+                    [course],
+                    owner_key="bob",
+                    platform_key="xiaoya",
+                    platform_label="小雅",
+                )
+
+            self.assertEqual((alice.inserted, bob.inserted), (1, 1))
+            updated_course = KnownCourseConfig(
+                course="结构化学 II",
+                course_id="6902426124991620398",
+                task_url="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426124991620398/task",
+                source="cached",
+            )
+            with session_factory() as session:
+                updated = upsert_platform_courses(
+                    session,
+                    [updated_course],
+                    owner_key="alice",
+                    platform_key="xiaoya",
+                    platform_label="小雅",
+                )
+                alice_courses = list_platform_courses(session, owner_key="alice", platform_key="xiaoya")
+                bob_courses = list_platform_courses(session, owner_key="bob", platform_key="xiaoya")
+
+            self.assertEqual(updated.updated, 1)
+            self.assertEqual([item.course for item in alice_courses], ["结构化学 II"])
+            self.assertEqual([item.course for item in bob_courses], ["结构化学"])
+            self.assertEqual(platform_course_to_known_course(alice_courses[0]).course_id, "6902426124991620398")
 
 
 if __name__ == "__main__":

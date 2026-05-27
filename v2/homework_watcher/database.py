@@ -9,7 +9,8 @@ from sqlalchemy import Engine, create_engine, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .candidates import AssignmentCandidate
-from .models import Assignment, Base
+from .config_loader import KnownCourseConfig
+from .models import Assignment, Base, PlatformCourse
 from .settings import Settings, load_settings
 from .status import TODO_STATUSES
 
@@ -37,6 +38,13 @@ ASSIGNMENT_COPY_COLUMNS = [
 
 @dataclass(frozen=True)
 class UpsertStats:
+    inserted: int = 0
+    updated: int = 0
+    skipped: int = 0
+
+
+@dataclass(frozen=True)
+class CourseUpsertStats:
     inserted: int = 0
     updated: int = 0
     skipped: int = 0
@@ -181,6 +189,110 @@ def list_assignments(session: Session, *, owner_key: str = DEFAULT_OWNER_KEY) ->
             )
         )
     )
+
+
+def upsert_platform_courses(
+    session: Session,
+    courses: Iterable[KnownCourseConfig],
+    *,
+    owner_key: str = DEFAULT_OWNER_KEY,
+    platform_key: str,
+    platform_label: str,
+    now: datetime | None = None,
+) -> CourseUpsertStats:
+    timestamp = now or datetime.now()
+    inserted = 0
+    updated = 0
+    skipped = 0
+
+    for course in courses:
+        course_name = course.course.strip()
+        course_id = course.course_id.strip()
+        task_url = course.task_url.strip()
+        if not course_name or not course_id or not task_url:
+            skipped += 1
+            continue
+        existing = session.scalar(
+            select(PlatformCourse).where(
+                PlatformCourse.owner_key == owner_key,
+                PlatformCourse.platform_key == platform_key,
+                PlatformCourse.course_id == course_id,
+            )
+        )
+        if existing is None:
+            session.add(
+                PlatformCourse(
+                    owner_key=owner_key,
+                    platform_key=platform_key,
+                    platform_label=platform_label,
+                    course=course_name,
+                    course_id=course_id,
+                    task_url=task_url,
+                    source=course.source or "discovered",
+                    active=True,
+                    first_seen_at=timestamp,
+                    last_seen_at=timestamp,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            inserted += 1
+            continue
+
+        existing.platform_label = platform_label
+        existing.course = course_name
+        existing.task_url = task_url
+        existing.source = course.source or existing.source
+        existing.active = True
+        existing.last_seen_at = timestamp
+        existing.updated_at = timestamp
+        updated += 1
+
+    session.commit()
+    return CourseUpsertStats(inserted=inserted, updated=updated, skipped=skipped)
+
+
+def list_platform_courses(
+    session: Session,
+    *,
+    owner_key: str = DEFAULT_OWNER_KEY,
+    platform_key: str,
+    active_only: bool = True,
+) -> list[PlatformCourse]:
+    statement = select(PlatformCourse).where(
+        PlatformCourse.owner_key == owner_key,
+        PlatformCourse.platform_key == platform_key,
+    )
+    if active_only:
+        statement = statement.where(PlatformCourse.active.is_(True))
+    return list(session.scalars(statement.order_by(PlatformCourse.course.asc(), PlatformCourse.course_id.asc())))
+
+
+def platform_course_to_known_course(course: PlatformCourse) -> KnownCourseConfig:
+    return KnownCourseConfig(
+        course=course.course,
+        course_id=course.course_id,
+        task_url=course.task_url,
+        source=course.source or "cached",
+    )
+
+
+def platform_course_to_dict(course: PlatformCourse) -> dict[str, str | int | bool]:
+    return {
+        "id": course.id,
+        "owner_key": course.owner_key,
+        "platform_key": course.platform_key,
+        "platform_label": course.platform_label,
+        "course": course.course,
+        "course_id": course.course_id,
+        "task_url": course.task_url,
+        "source": course.source,
+        "active": course.active,
+        "first_seen_at": course.first_seen_at.isoformat(timespec="seconds"),
+        "last_seen_at": course.last_seen_at.isoformat(timespec="seconds"),
+        "created_at": course.created_at.isoformat(timespec="seconds"),
+        "updated_at": course.updated_at.isoformat(timespec="seconds"),
+    }
 
 
 def assignment_to_dict(assignment: Assignment) -> dict[str, str | int | bool]:

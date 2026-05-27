@@ -100,10 +100,15 @@ class ScanProgressStore:
             snapshot = self._items.get(owner_key)
             if snapshot is None or snapshot.scan_id != scan_id or snapshot.status != "running":
                 return
-            todo_count = len(result.get("todos") or [])
+            if result.get("mode") == "courses" or ("courses" in result and "todos" not in result):
+                course_count = len(result.get("courses") or [])
+                message = f"扫描课程完成，保存 {course_count} 门课程"
+            else:
+                todo_count = len(result.get("todos") or [])
+                message = f"扫描完成，当前待办 {todo_count} 条"
             snapshot.status = "succeeded"
             snapshot.percent = 100
-            snapshot.message = f"扫描完成，当前待办 {todo_count} 条"
+            snapshot.message = message
             snapshot.finished_at = datetime.now()
             snapshot.result = result
             snapshot.error = ""

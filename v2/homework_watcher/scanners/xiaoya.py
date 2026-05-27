@@ -9,6 +9,14 @@ from typing import Callable
 
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.config_loader import KnownCourseConfig
+from homework_watcher.database import (
+    CourseUpsertStats,
+    create_session_factory,
+    list_platform_courses,
+    platform_course_to_dict,
+    platform_course_to_known_course,
+    upsert_platform_courses,
+)
 from homework_watcher.debug_dump import dump_debug_page
 from homework_watcher.remote_login import profile_dir_for_user_platform
 from homework_watcher.scanners.xiaoya_discovery import (
@@ -256,6 +264,11 @@ def sanitize_snapshot(value: str) -> str:
     return sanitized[:1000]
 
 
+def emit_course_scan(emit: Callable[[str], None] | None, message: str) -> None:
+    if emit is not None:
+        emit(message)
+
+
 class XiaoyaScanner:
     platform_key = "xiaoya"
 
@@ -275,6 +288,7 @@ class XiaoyaScanner:
         summary = {
             "platform_label": XIAOYA_PLATFORM_LABEL,
             "known_courses_count": len(config.known_courses) if config is not None else 0,
+            "cached_courses_count": 0,
             "discovered_courses_count": 0,
             "merged_courses_count": 0,
             "scanned_courses_count": 0,
@@ -292,10 +306,35 @@ class XiaoyaScanner:
             summary["message"] = "小雅未启用或缺少平台配置"
             context.emit(5, "小雅：未启用，跳过")
             return []
-        if not config.known_courses and not config.auto_discover_courses:
+
+        cached_courses = self.load_cached_courses(context.user_key)
+        summary["cached_courses_count"] = len(cached_courses)
+        merge = merge_xiaoya_courses(
+            config.known_courses,
+            cached_courses,
+            emit=lambda message: context.emit(8, message.replace("xiaoya-discover", "xiaoya-cache")),
+        )
+        summary.update(
+            {
+                "known_courses_count": merge.known_count,
+                "cached_courses_count": len(cached_courses),
+                "merged_courses_count": len(merge.courses),
+                "duplicates_count": merge.duplicates_count,
+            }
+        )
+        emit_xiaoya_merge_log(
+            merge.courses,
+            known_count=merge.known_count,
+            discovered_count=len(cached_courses),
+            emit=lambda message: context.emit(
+                8,
+                message.replace("xiaoya-merge", "xiaoya-cache").replace("discovered_count", "cached_count"),
+            ),
+        )
+        if not merge.courses:
             summary["status"] = "skipped"
-            summary["message"] = "小雅没有已知课程且未开启自动发现"
-            context.emit(5, "小雅：没有可扫描课程且未开启自动发现，跳过")
+            summary["message"] = "小雅没有已保存课程，请先扫描课程"
+            context.emit(5, "小雅：没有已保存课程，请先扫描课程")
             return []
 
         profile_dir = self.profile_dir_for_user(context.user_key)
@@ -311,46 +350,6 @@ class XiaoyaScanner:
             )
             try:
                 page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
-                discovered_courses: list[KnownCourseConfig] = []
-                if config.auto_discover_courses:
-                    try:
-                        discovered_courses = XiaoyaCourseDiscoverer(self.settings).discover(
-                            page,
-                            mycourse_url=config.mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL,
-                            scan_id=context.scan_id,
-                            emit=lambda message: context.emit(12, message),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - surface discovery failure without crashing scan.
-                        context.emit(
-                            12,
-                            f"[xiaoya-discover] failed type={type(exc).__name__} message={exc}",
-                        )
-
-                merge = merge_xiaoya_courses(
-                    config.known_courses,
-                    discovered_courses,
-                    emit=lambda message: context.emit(13, message),
-                )
-                summary.update(
-                    {
-                        "known_courses_count": merge.known_count,
-                        "discovered_courses_count": merge.discovered_count,
-                        "merged_courses_count": len(merge.courses),
-                        "duplicates_count": merge.duplicates_count,
-                    }
-                )
-                emit_xiaoya_merge_log(
-                    merge.courses,
-                    known_count=merge.known_count,
-                    discovered_count=merge.discovered_count,
-                    emit=lambda message: context.emit(13, message),
-                )
-                if not merge.courses:
-                    summary["status"] = "skipped"
-                    summary["message"] = "小雅本轮未发现可扫描课程，请确认登录态和课程页"
-                    context.emit(15, "小雅：没有可扫描课程，跳过")
-                    return []
-
                 summary["status"] = "running"
                 summary["message"] = "小雅正在扫描课程任务页"
                 for index, course in enumerate(merge.courses, start=1):
@@ -391,6 +390,97 @@ class XiaoyaScanner:
                 return results
             finally:
                 browser_context.close()
+
+    def load_cached_courses(self, user_key: str) -> list[KnownCourseConfig]:
+        session_factory = create_session_factory(self.settings)
+        with session_factory() as session:
+            courses = list_platform_courses(
+                session,
+                owner_key=user_key,
+                platform_key=self.platform_key,
+            )
+            return [platform_course_to_known_course(course) for course in courses]
+
+    def discover_and_cache_courses(
+        self,
+        config,
+        *,
+        user_key: str,
+        scan_id: str = "scan-xiaoya-courses",
+        emit: Callable[[str], None] | None = None,
+    ) -> tuple[list[dict[str, str | int | bool]], dict[str, object], CourseUpsertStats]:
+        summary: dict[str, object] = {
+            "platform_label": XIAOYA_PLATFORM_LABEL,
+            "known_courses_count": len(config.known_courses) if config is not None else 0,
+            "cached_courses_count": 0,
+            "discovered_courses_count": 0,
+            "merged_courses_count": 0,
+            "saved_courses_count": 0,
+            "inserted_courses_count": 0,
+            "updated_courses_count": 0,
+            "skipped_courses_count": 0,
+            "status": "pending",
+            "message": "",
+        }
+        if config is None:
+            summary["status"] = "failed"
+            summary["message"] = "小雅缺少平台配置"
+            return [], summary, CourseUpsertStats()
+
+        emit_course_scan(emit, "小雅：开始扫描课程")
+        discovered_courses = self.discover_courses_only(
+            config,
+            user_key=user_key,
+            scan_id=scan_id,
+            emit=emit,
+        )
+        merge = merge_xiaoya_courses(
+            config.known_courses,
+            discovered_courses,
+            emit=emit,
+        )
+        stats = CourseUpsertStats()
+        if merge.courses:
+            session_factory = create_session_factory(self.settings)
+            with session_factory() as session:
+                stats = upsert_platform_courses(
+                    session,
+                    merge.courses,
+                    owner_key=user_key,
+                    platform_key=self.platform_key,
+                    platform_label=XIAOYA_PLATFORM_LABEL,
+                )
+        session_factory = create_session_factory(self.settings)
+        with session_factory() as session:
+            saved_courses = [
+                platform_course_to_dict(course)
+                for course in list_platform_courses(
+                    session,
+                    owner_key=user_key,
+                    platform_key=self.platform_key,
+                )
+            ]
+
+        summary.update(
+            {
+                "known_courses_count": merge.known_count,
+                "cached_courses_count": len(saved_courses),
+                "discovered_courses_count": merge.discovered_count,
+                "merged_courses_count": len(merge.courses),
+                "saved_courses_count": len(saved_courses),
+                "inserted_courses_count": stats.inserted,
+                "updated_courses_count": stats.updated,
+                "skipped_courses_count": stats.skipped,
+                "status": "succeeded" if saved_courses else "skipped",
+                "message": (
+                    f"小雅课程扫描完成，已保存 {len(saved_courses)} 门课程"
+                    if saved_courses
+                    else "小雅本轮未发现可保存课程，请确认登录态和课程页"
+                ),
+            }
+        )
+        emit_course_scan(emit, str(summary["message"]))
+        return saved_courses, summary, stats
 
     def discover_courses_only(
         self,
