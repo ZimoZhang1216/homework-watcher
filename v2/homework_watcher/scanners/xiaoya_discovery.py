@@ -106,6 +106,11 @@ COURSE_ACTION_PHRASES = (
 COURSE_ACTION_WORDS = {"查看", "任务", "作业", "学习", "Q&A"}
 COURSE_NAME_NOISE = {
     "我的课程",
+    "我的文档",
+    "基础库",
+    "发现",
+    "登录",
+    "收起菜单",
     "课程列表",
     "全部课程",
     "所有的课",
@@ -479,6 +484,7 @@ def resolve_course_cards_by_clicking(
         )
         emit_discovery(emit, f"[xiaoya-click-discover] candidate_count={len(cards)} list_page={list_page_no}")
         if not cards:
+            emit_discovery(emit, "[xiaoya-click-discover] skipped reason=no_course_cards")
             break
 
         page_available = True
@@ -616,7 +622,21 @@ def collect_xiaoya_click_course_candidates(page: Page) -> list[dict[str, Any]]:
     page_candidates = []
     page_candidates.extend(evaluate_course_candidates(page))
     page_candidates.extend(evaluate_clickable_course_cards(page))
-    return dedupe_course_card_candidates(page_candidates)
+    return dedupe_course_card_candidates(
+        [candidate for candidate in page_candidates if has_clickable_course_signal(candidate)]
+    )
+
+
+def has_clickable_course_signal(candidate: dict[str, Any]) -> bool:
+    if extract_course_id_from_raw(candidate):
+        return True
+    attrs = str(candidate.get("attrs") or "")
+    if "data-xy-click-pt=enter-course" in attrs or "aia_course_card" in attrs:
+        return True
+    text = raw_text_hint(candidate)
+    if looks_like_course_card_text(text):
+        return True
+    return any(looks_like_course_card_text(str(value)) for value in candidate.get("title_texts") or [])
 
 
 def open_xiaoya_course_list_page(
@@ -756,7 +776,7 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                   courseRoot;
               };
               const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
-              const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
+              const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|我的课程.*我的文档.*基础库.*发现|待完成任务.*未读消息|用户协议|隐私政策|登录.*收起菜单/.test(text || '');
               const isCandidate = element => {
                 if (!visible(element)) return false;
                 const text = readableText(element);
@@ -888,6 +908,8 @@ def course_card_candidate_score(candidate: dict[str, Any]) -> int:
 
 
 def course_name_from_card_candidate(candidate: dict[str, Any]) -> str:
+    if not has_clickable_course_signal(candidate):
+        return ""
     blocks: list[str] = []
     attrs = str(candidate.get("attrs") or "")
     click_name = attr_value_from_summary(attrs, "data-xy-click-pt-name")
@@ -909,6 +931,8 @@ def attr_value_from_summary(attrs: str, name: str) -> str:
 
 
 def course_name_from_card_text(text: str) -> str:
+    if not looks_like_course_card_text(text):
+        return ""
     candidates = course_name_candidates(text, course_id="")
     if not candidates:
         return ""
@@ -1674,7 +1698,7 @@ def valid_course_name(name: str, *, course_id: str) -> bool:
         return False
     if re.match(r"^\d+次\s+\d+人\b", name):
         return False
-    if re.search(r"待完成任务|未读消息|用户协议|隐私政策|浏览器版本要求|使用帮助", name):
+    if re.search(r"待完成任务|未读消息|用户协议|隐私政策|浏览器版本要求|使用帮助|登录|收起菜单", name):
         return False
     if course_id and course_id in name:
         return False
@@ -1693,7 +1717,8 @@ def looks_like_course_nav_text(text: str) -> bool:
     return bool(
         re.search(
             r"我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|"
-            r"待完成任务.*未读消息|南开大学.*学习课程|用户协议|隐私政策",
+            r"我的课程.*我的文档.*基础库.*发现|待完成任务.*未读消息|"
+            r"南开大学.*学习课程|登录.*收起菜单|用户协议|隐私政策",
             text,
         )
     )

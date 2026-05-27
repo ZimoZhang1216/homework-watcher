@@ -19,6 +19,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     normalize_known_xiaoya_course,
     normalize_discovered_xiaoya_course,
     raw_course_candidates_from_network_payloads,
+    has_clickable_course_signal,
     should_resolve_course_cards_by_click,
 )
 
@@ -394,6 +395,25 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             ),
             "",
         )
+
+    def test_xiaoya_shell_navigation_is_not_click_candidate(self) -> None:
+        text = (
+            "我的课程 我的课程 我的课程 我的文档 基础库 发现 我的课程 我的文档 基础库 发现 "
+            "我的课程 我的文档 基础库 发现 登录 收起菜单"
+        )
+        raw = {
+            "href": "",
+            "absolute_href": "",
+            "text": text,
+            "attrs": "",
+            "ancestor_texts": [],
+            "ancestor_attrs": [],
+            "title_texts": [],
+        }
+
+        self.assertEqual(course_name_from_card_text(text), "")
+        self.assertFalse(has_clickable_course_signal(raw))
+        self.assertEqual(dedupe_course_card_candidates([raw]), [])
 
     def test_course_name_uses_xiaoya_click_tracking_name(self) -> None:
         self.assertEqual(
