@@ -7,6 +7,7 @@ import homework_watcher.scanners.xiaoya_discovery as xiaoya_discovery
 from homework_watcher.config_loader import KnownCourseConfig, parse_platform_config
 from homework_watcher.scanners.xiaoya_discovery import (
     CLICK_DISCOVERY_STEP_TIMEOUT_MS,
+    active_xiaoya_course_list_page_no,
     build_xiaoya_task_url,
     click_step_deadline,
     click_url_course_to_raw_candidate,
@@ -22,6 +23,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     merge_xiaoya_courses,
     normalize_known_xiaoya_course,
     normalize_discovered_xiaoya_course,
+    open_xiaoya_course_list_page,
     raw_course_candidates_from_network_payloads,
     has_clickable_course_signal,
     resolve_course_cards_by_clicking,
@@ -37,6 +39,27 @@ class FakeResponse:
 
     def text(self) -> str:
         return self._body
+
+
+class FakePage:
+    url = ""
+
+    def __init__(self, *, active_page_no: int = 0) -> None:
+        self.active_page_no = active_page_no
+        self.goto_calls: list[tuple[str, str, int]] = []
+        self.waits: list[int] = []
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.url = url
+        self.goto_calls.append((url, wait_until, timeout))
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.waits.append(timeout)
+
+    def evaluate(self, _script: str, *args):
+        if args:
+            return False
+        return self.active_page_no
 
 
 class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
@@ -582,6 +605,27 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(courses), 1)
         self.assertEqual(extract_course_id_from_raw(courses[0]), "6902426124991620398")
         self.assertFalse(any("reason=timeout" in message for message in emitted))
+
+    def test_active_course_list_page_reads_visible_pagination(self) -> None:
+        self.assertEqual(active_xiaoya_course_list_page_no(FakePage(active_page_no=2)), 2)
+
+    def test_open_course_list_resets_remembered_page_before_scanning_page_one(self) -> None:
+        page = FakePage(active_page_no=2)
+
+        with (
+            patch.object(xiaoya_discovery, "click_xiaoya_course_page_number", return_value=True) as click_page,
+            patch.object(xiaoya_discovery, "read_xiaoya_body_text", return_value="page-two"),
+            patch.object(xiaoya_discovery, "wait_after_xiaoya_course_page_click") as wait_after_click,
+        ):
+            opened = open_xiaoya_course_list_page(
+                page,
+                "https://nankai.ai-augmented.com/app/jx-web/mycourse",
+                page_no=1,
+            )
+
+        self.assertTrue(opened)
+        click_page.assert_called_once_with(page, 1)
+        wait_after_click.assert_called_once_with(page, "page-two")
 
     def test_xiaoya_config_defaults_auto_discover_true(self) -> None:
         config = parse_platform_config(

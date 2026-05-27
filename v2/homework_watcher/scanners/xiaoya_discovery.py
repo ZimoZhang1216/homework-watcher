@@ -680,6 +680,8 @@ def open_xiaoya_course_list_page(
             timeout_ms = min(timeout_ms, max(1000, remaining_deadline_ms(deadline)))
         page.goto(mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL, wait_until="domcontentloaded", timeout=timeout_ms)
         page.wait_for_timeout(min(COURSE_LIST_PAGE_WAIT_MS, remaining_deadline_ms(deadline)))
+        if not reset_xiaoya_course_list_to_first_page(page, deadline=deadline):
+            return False
         for target_page_no in range(2, page_no + 1):
             if deadline is not None and remaining_deadline_ms(deadline) <= 0:
                 return False
@@ -688,6 +690,63 @@ def open_xiaoya_course_list_page(
         return True
     except Exception:
         return False
+
+
+def reset_xiaoya_course_list_to_first_page(page: Page, *, deadline: float | None = None) -> bool:
+    current_page_no = active_xiaoya_course_list_page_no(page)
+    if current_page_no in (0, 1):
+        return True
+    if deadline is not None and remaining_deadline_ms(deadline) <= 0:
+        return False
+    previous_text = read_xiaoya_body_text(page)
+    if not click_xiaoya_course_page_number(page, 1):
+        return False
+    wait_after_xiaoya_course_page_click(page, previous_text)
+    return True
+
+
+def active_xiaoya_course_list_page_no(page: Page) -> int:
+    try:
+        value = page.evaluate(
+            """
+            () => {
+              const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+              const visible = element => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const parsePageNo = element => {
+                if (!element) return 0;
+                const values = [
+                  compact(element.innerText || element.textContent || ''),
+                  compact(element.getAttribute('title') || ''),
+                  compact(element.getAttribute('aria-label') || '')
+                ];
+                for (const value of values) {
+                  const match = value.match(/\\d+/);
+                  if (match) return Number.parseInt(match[0], 10) || 0;
+                }
+                return 0;
+              };
+              const roots = Array.from(document.querySelectorAll(
+                '.pagination_container, .ant-pagination, .el-pagination, [class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]'
+              )).filter(visible);
+              for (const root of roots) {
+                const active = Array.from(root.querySelectorAll(
+                  '.ant-pagination-item-active, [aria-current="page"], [class*="active"], [class*="Active"], [class*="current"], [class*="Current"]'
+                )).find(visible);
+                const pageNo = parsePageNo(active);
+                if (pageNo > 0) return pageNo;
+              }
+              return 0;
+            }
+            """
+        )
+        return int(value or 0)
+    except Exception:
+        return 0
 
 
 def click_next_xiaoya_course_list_page(page: Page, *, target_page_no: int | None = None) -> bool:
