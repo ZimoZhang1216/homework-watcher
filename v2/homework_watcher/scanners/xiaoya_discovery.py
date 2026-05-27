@@ -500,26 +500,29 @@ def resolve_course_cards_by_clicking(
             break
 
         page_available = True
+        list_page_loaded = True
         while True:
-            open_deadline = click_step_deadline(step_timeout_ms)
-            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
-                page_available = False
-                if remaining_deadline_ms(open_deadline) <= 0:
-                    emit_discovery(
-                        emit,
-                        f"[xiaoya-click-discover] skipped reason=step_timeout step=return_list list_page={list_page_no}",
-                    )
-                else:
-                    emit_discovery(
-                        emit,
-                        f"[xiaoya-click-discover] skipped reason=return_list_failed list_page={list_page_no}",
-                    )
-                break
-            cards = wait_for_xiaoya_click_course_candidates(
-                page,
-                timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
-                seed_candidates=seed_candidates if list_page_no == 1 else None,
-            )
+            if not list_page_loaded:
+                open_deadline = click_step_deadline(step_timeout_ms)
+                if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
+                    page_available = False
+                    if remaining_deadline_ms(open_deadline) <= 0:
+                        emit_discovery(
+                            emit,
+                            f"[xiaoya-click-discover] skipped reason=step_timeout step=return_list list_page={list_page_no}",
+                        )
+                    else:
+                        emit_discovery(
+                            emit,
+                            f"[xiaoya-click-discover] skipped reason=return_list_failed list_page={list_page_no}",
+                        )
+                    break
+                cards = wait_for_xiaoya_click_course_candidates(
+                    page,
+                    timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
+                    seed_candidates=seed_candidates if list_page_no == 1 else None,
+                )
+                list_page_loaded = True
             card = next_unattempted_click_card(cards, attempted_names)
             if card is None:
                 break
@@ -568,6 +571,7 @@ def resolve_course_cards_by_clicking(
                     f"[xiaoya-click-discover] skipped reason=click_failed course={sanitize_log_value(course_name)}",
                 )
                 continue
+            list_page_loaded = False
             course_id = wait_for_course_id_after_click(
                 page,
                 timeout_ms=min(CLICK_COURSE_TIMEOUT_MS, normalized_click_step_timeout_ms(step_timeout_ms)),
@@ -604,14 +608,6 @@ def resolve_course_cards_by_clicking(
             )
 
         if not page_available:
-            break
-        open_deadline = click_step_deadline(step_timeout_ms)
-        if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=open_deadline):
-            if remaining_deadline_ms(open_deadline) <= 0:
-                emit_discovery(
-                    emit,
-                    f"[xiaoya-click-discover] skipped reason=step_timeout step=return_list list_page={list_page_no}",
-                )
             break
         if not click_next_xiaoya_course_list_page(page, target_page_no=list_page_no + 1):
             emit_discovery(
