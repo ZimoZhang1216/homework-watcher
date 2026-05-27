@@ -669,6 +669,7 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
             page.evaluate(
                 """
                 () => {
+                  const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
                   const visible = element => {
                     if (!element) return false;
                     const rect = element.getBoundingClientRect();
@@ -682,25 +683,55 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
                       klass.includes('disabled') ||
                       klass.includes('is-disabled');
                   };
+                  const clickTarget = element => {
+                    if (!element) return false;
+                    const target = element.closest('button,a,li,[role="button"]') || element;
+                    if (!visible(target) || disabled(target)) return false;
+                    target.scrollIntoView({block: 'center', inline: 'center'});
+                    target.click();
+                    return true;
+                  };
                   const selectors = [
                     '.ant-pagination-next:not(.ant-pagination-disabled)',
                     'li[title="下一页"]:not(.ant-pagination-disabled)',
+                    '.ant-pagination [aria-label*="Next"]:not([disabled])',
+                    '.ant-pagination [aria-label*="下一页"]:not([disabled])',
+                    '[class*="pagination"] [class*="next"]:not([disabled])',
+                    '[class*="pager"] [class*="next"]:not([disabled])',
                     '.el-pagination .btn-next:not(:disabled)',
                     'button[aria-label*="Next"]:not([disabled])',
                     'button[aria-label*="下一页"]:not([disabled])'
                   ];
                   for (const selector of selectors) {
-                    const element = document.querySelector(selector);
-                    if (visible(element) && !disabled(element)) {
-                      element.click();
-                      return true;
+                    for (const element of Array.from(document.querySelectorAll(selector))) {
+                      if (clickTarget(element)) return true;
                     }
                   }
-                  for (const element of Array.from(document.querySelectorAll('button,a,li,span'))) {
-                    const text = (element.innerText || element.getAttribute('aria-label') || element.title || '').trim();
-                    if (!disabled(element) && visible(element) && ['下一页', '>', '›', '»'].includes(text)) {
-                      element.click();
-                      return true;
+                  const pageText = element => compact(element.innerText || element.textContent || element.getAttribute('aria-label') || element.title || '');
+                  const paginationRoots = Array.from(document.querySelectorAll(
+                    '.ant-pagination, .el-pagination, [class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]'
+                  )).filter(visible);
+                  const roots = paginationRoots.length ? paginationRoots : [document.body];
+                  const activeNodes = roots.flatMap(root => Array.from(root.querySelectorAll(
+                    '.ant-pagination-item-active, [aria-current="page"], [class*="active"], [class*="Active"], [class*="current"], [class*="Current"]'
+                  )));
+                  const current = activeNodes
+                    .map(node => parseInt(pageText(node), 10))
+                    .find(number => Number.isFinite(number) && number > 0);
+                  if (current) {
+                    const nextText = String(current + 1);
+                    for (const root of roots) {
+                      for (const element of Array.from(root.querySelectorAll('button,a,li,span,[role="button"]'))) {
+                        if (pageText(element) === nextText && clickTarget(element)) return true;
+                      }
+                    }
+                  }
+                  for (const root of roots) {
+                    for (const element of Array.from(root.querySelectorAll('button,a,li,span,[role="button"]'))) {
+                      const text = pageText(element);
+                      if (['下一页', '>', '›', '»'].includes(text) && clickTarget(element)) {
+                        return true;
+                      }
                     }
                   }
                   return false;
@@ -710,15 +741,16 @@ def click_next_xiaoya_course_list_page(page: Page) -> bool:
         )
         if not clicked:
             return False
-        page.wait_for_function(
-            "(oldText) => document.body && document.body.innerText !== oldText",
-            arg=previous_text,
-            timeout=5000,
-        )
+        try:
+            page.wait_for_function(
+                "(oldText) => document.body && document.body.innerText !== oldText",
+                arg=previous_text,
+                timeout=5000,
+            )
+        except PlaywrightTimeoutError:
+            pass
         page.wait_for_timeout(500)
         return True
-    except PlaywrightTimeoutError:
-        return False
     except Exception:
         return False
 
