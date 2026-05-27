@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from html import escape
+from urllib.parse import urlencode
 
 import uvicorn
 from fastapi import FastAPI, Query, Request
@@ -20,7 +21,16 @@ from .auth import (
     read_session_username,
     user_to_current,
 )
-from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
+from .database import (
+    add_manual_assignment,
+    assignment_to_dict,
+    create_session_factory,
+    init_db,
+    is_manual_assignment_dict,
+    list_assignments,
+    list_todos,
+    set_manual_assignment_completed,
+)
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
 from .remote_login import RemoteLoginManager, build_novnc_url
@@ -72,6 +82,7 @@ def create_app() -> FastAPI:
                   <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。先用“扫描课程”保存小雅课程列表，再用“扫描任务”读取已登录平台的作业列表。</p>
                   {render_scan_guide()}
                   {render_assignment_table(todos)}
+                  {render_manual_assignment_panel(request.query_params.get("manual_error", ""))}
                   <div class="actions">
                     <form method="post" action="/scan?redirect=1" class="scan-form" data-scan-start-url="/api/scan/start">
                       <button type="submit" class="scan-action-button">扫描任务</button>
@@ -140,6 +151,42 @@ def create_app() -> FastAPI:
         response = RedirectResponse(LOGIN_PATH, status_code=303)
         response.delete_cookie(AUTH_COOKIE_NAME)
         return response
+
+    @app.post("/manual-assignments")
+    async def create_manual_assignment(request: Request):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        fields = parse_urlencoded_form(await request.body())
+        try:
+            due_at = parse_manual_due_at(fields.get("due_at", ""))
+            with session_factory() as session:
+                add_manual_assignment(
+                    session,
+                    owner_key=user.username,
+                    title=fields.get("title", ""),
+                    due_at=due_at,
+                    completed=fields.get("completed") == "1",
+                    recurrence=fields.get("recurrence", "none"),
+                )
+        except ValueError as exc:
+            return RedirectResponse(f"/?{urlencode({'manual_error': str(exc)})}", status_code=303)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/manual-assignments/{assignment_id}/completion")
+    async def update_manual_assignment_completion(request: Request, assignment_id: int):
+        user = current_user_from_request(request, session_factory, settings)
+        if user is None:
+            return redirect_to_login()
+        fields = parse_urlencoded_form(await request.body())
+        with session_factory() as session:
+            set_manual_assignment_completed(
+                session,
+                owner_key=user.username,
+                assignment_id=assignment_id,
+                completed=fields.get("completed") == "1",
+            )
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/scan")
     def scan(request: Request, redirect: bool = Query(False)):
@@ -295,7 +342,7 @@ def create_app() -> FastAPI:
                     <h2>所有记录</h2>
                     <span class="count">{len(items)}</span>
                   </div>
-                  {render_assignment_table(items)}
+                  {render_assignment_table(items, allow_manual_completion=False)}
                   <div class="actions"><a class="button-link" href="/">返回待办</a></div>
                 </section>
                 """,
@@ -593,6 +640,30 @@ def render_scan_guide() -> str:
     """
 
 
+def render_manual_assignment_panel(error: str = "") -> str:
+    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    return f"""
+    <div class="manual-add">
+      <h3>手动添加作业</h3>
+      {error_html}
+      <form method="post" action="/manual-assignments" class="manual-form">
+        <label>作业名<input name="title" maxlength="300" required></label>
+        <label>截止时间<input name="due_at" type="datetime-local" required></label>
+        <label>重复周期
+          <select name="recurrence">
+            <option value="none">不重复</option>
+            <option value="daily">每天</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+          </select>
+        </label>
+        <label class="check-row"><input name="completed" type="checkbox" value="1"><span>已完成</span></label>
+        <button type="submit">添加作业</button>
+      </form>
+    </div>
+    """
+
+
 def render_scan_summary(result) -> str:
     if result is None:
         return ""
@@ -643,7 +714,11 @@ def platform_summaries_from_scan_result(result) -> dict[str, dict[str, object]]:
     return value if isinstance(value, dict) else {}
 
 
-def render_assignment_table(assignments: list[dict[str, object]]) -> str:
+def render_assignment_table(
+    assignments: list[dict[str, object]],
+    *,
+    allow_manual_completion: bool = True,
+) -> str:
     if not assignments:
         return '<p class="muted">当前没有待办。扫描服务接入后会在这里显示作业。</p>'
 
@@ -652,12 +727,17 @@ def render_assignment_table(assignments: list[dict[str, object]]) -> str:
         url = str(item.get("url") or "")
         title = escape(str(item.get("title") or ""))
         link = f'<a href="{escape(url)}" target="_blank" rel="noreferrer">{title}</a>' if url else title
+        status = (
+            render_manual_completion_control(item)
+            if allow_manual_completion and is_manual_assignment_dict(item)
+            else escape(str(item.get("status_raw") or ""))
+        )
         rows.append(
             "<tr>"
             f"<td data-label=\"平台\">{escape(str(item.get('platform') or ''))}</td>"
             f"<td data-label=\"课程\">{escape(str(item.get('course') or ''))}</td>"
             f"<td data-label=\"标题\">{link}</td>"
-            f"<td data-label=\"状态\">{escape(str(item.get('status_raw') or ''))}</td>"
+            f"<td data-label=\"状态\">{status}</td>"
             f"<td data-label=\"截止时间\">{escape(str(item.get('due_at') or ''))}</td>"
             f"<td data-label=\"距今时间\">{escape(format_due_distance(item.get('due_at')))}</td>"
             "</tr>"
@@ -668,6 +748,34 @@ def render_assignment_table(assignments: list[dict[str, object]]) -> str:
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
+
+
+def render_manual_completion_control(item: dict[str, object]) -> str:
+    assignment_id = str(item.get("id") or "")
+    completed = str(item.get("status_normalized") or "") == "completed"
+    checked = " checked" if completed else ""
+    label = "已完成" if completed else "未完成"
+    return f"""
+    <form method="post" action="/manual-assignments/{escape(assignment_id)}/completion" class="inline-form">
+      <input type="hidden" name="completed" value="0">
+      <label class="check-action">
+        <input type="checkbox" name="completed" value="1"{checked} onchange="this.form.submit()">
+        <span>{label}</span>
+      </label>
+    </form>
+    """
+
+
+def parse_manual_due_at(value: str) -> datetime:
+    text = (value or "").strip()
+    if not text:
+        raise ValueError("请选择截止时间")
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    raise ValueError("截止时间格式不正确")
 
 
 def format_due_distance(value: object, *, now: datetime | None = None) -> str:
@@ -859,7 +967,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     .auth-panel {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }}
     .auth-form {{ display: grid; gap: 14px; }}
     label {{ display: grid; gap: 6px; color: var(--muted); font-weight: 800; }}
-    input {{
+    input, select {{
       min-height: 42px;
       border: 1px solid var(--border-strong);
       background: var(--surface-subtle);
@@ -869,10 +977,36 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       font: inherit;
       accent-color: var(--primary);
     }}
+    select {{ appearance: auto; }}
+    input[type="checkbox"] {{ min-height: auto; width: 18px; height: 18px; padding: 0; }}
     input:focus, button:focus-visible, .button-link:focus-visible {{
       outline: 3px solid var(--primary-ring);
       outline-offset: 2px;
     }}
+    .manual-add {{
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface-subtle);
+      padding: 16px;
+    }}
+    h3 {{ margin: 0 0 12px; font-size: 18px; }}
+    .manual-form {{
+      display: grid;
+      grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 0.9fr) minmax(120px, 0.7fr) auto auto;
+      gap: 12px;
+      align-items: end;
+    }}
+    .check-row, .check-action {{
+      display: inline-flex;
+      flex-direction: row;
+      gap: 8px;
+      align-items: center;
+      min-height: 42px;
+      color: var(--text);
+      font-weight: 800;
+    }}
+    .inline-form {{ margin: 0; }}
     .error {{ color: var(--danger); font-weight: 800; }}
     .login-panel, .summary-panel {{ margin-top: 18px; }}
     .summary-note {{ margin: 8px 0 0; }}
@@ -937,6 +1071,8 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       .panel-title {{ align-items: flex-start; }}
       .page-note {{ margin-bottom: 16px; }}
       .scan-guide {{ grid-template-columns: 1fr; }}
+      .manual-form {{ grid-template-columns: 1fr; }}
+      .manual-form button {{ width: 100%; }}
       .actions {{ flex-direction: column; }}
       .actions > *, .actions form, .actions button, .actions .button-link {{ width: 100%; }}
       .actions button, .actions .button-link {{ box-sizing: border-box; }}

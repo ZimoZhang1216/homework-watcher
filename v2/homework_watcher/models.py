@@ -65,3 +65,16 @@ class PlatformCourse(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ManualAssignmentSeries(Base):
+    __tablename__ = "manual_assignment_series"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_key: Mapped[str] = mapped_column(String(120), nullable=False, default="default", index=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    recurrence: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    next_due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

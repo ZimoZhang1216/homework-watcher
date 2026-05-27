@@ -5,8 +5,10 @@ from datetime import datetime
 
 from homework_watcher.app import (
     format_due_distance,
+    parse_manual_due_at,
     render_assignment_table,
     render_auth_panel,
+    render_manual_assignment_panel,
     render_scan_guide,
     render_scan_summary,
     render_page_script,
@@ -119,6 +121,57 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("距今时间", table)
         self.assertIn('data-label="课程"', table)
         self.assertNotIn("最后发现", table)
+
+    def test_manual_assignment_table_has_completion_checkbox(self) -> None:
+        table = render_assignment_table(
+            [
+                {
+                    "id": 12,
+                    "platform": "手动",
+                    "course": "手动添加",
+                    "title": "自定义作业",
+                    "status_raw": "进行中",
+                    "status_normalized": "in_progress",
+                    "due_at": "2026-06-01T20:00:00",
+                    "source_key": "manual:single:alice:2026-05-27T20:00:00",
+                }
+            ]
+        )
+
+        self.assertIn("/manual-assignments/12/completion", table)
+        self.assertIn('type="checkbox"', table)
+
+    def test_assignment_table_can_hide_manual_completion_checkbox(self) -> None:
+        table = render_assignment_table(
+            [
+                {
+                    "id": 12,
+                    "platform": "手动",
+                    "course": "手动添加",
+                    "title": "自定义作业",
+                    "status_raw": "已完成",
+                    "status_normalized": "completed",
+                    "due_at": "2026-06-01T20:00:00",
+                    "source_key": "manual:single:alice:2026-05-27T20:00:00",
+                }
+            ],
+            allow_manual_completion=False,
+        )
+
+        self.assertIn("已完成", table)
+        self.assertNotIn('type="checkbox"', table)
+
+    def test_manual_assignment_panel_includes_recurrence_options(self) -> None:
+        panel = render_manual_assignment_panel()
+
+        self.assertIn("手动添加作业", panel)
+        self.assertIn('name="recurrence"', panel)
+        self.assertIn("每天", panel)
+        self.assertIn("每周", panel)
+        self.assertIn("每月", panel)
+
+    def test_parse_manual_due_at_accepts_datetime_local(self) -> None:
+        self.assertEqual(parse_manual_due_at("2026-06-01T20:30"), datetime(2026, 6, 1, 20, 30))
 
     def test_auth_panel_uses_student_id_wording(self) -> None:
         panel = render_auth_panel()

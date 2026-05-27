@@ -10,12 +10,14 @@ from sqlalchemy import create_engine, text
 from homework_watcher.candidates import AssignmentCandidate
 from homework_watcher.config_loader import KnownCourseConfig
 from homework_watcher.database import (
+    add_manual_assignment,
     create_session_factory,
     init_db,
     list_assignments,
     list_platform_courses,
     list_todos,
     platform_course_to_known_course,
+    set_manual_assignment_completed,
     upsert_assignments,
     upsert_platform_courses,
 )
@@ -245,6 +247,58 @@ class Phase2DatabaseTests(unittest.TestCase):
             self.assertEqual([item.course for item in alice_courses], ["结构化学 II"])
             self.assertEqual([item.course for item in bob_courses], ["结构化学"])
             self.assertEqual(platform_course_to_known_course(alice_courses[0]).course_id, "6902426124991620398")
+
+    def test_manual_assignment_can_be_added_and_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = test_settings(f"sqlite:///{Path(tmpdir) / 'homework.sqlite3'}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+
+            with session_factory() as session:
+                assignment = add_manual_assignment(
+                    session,
+                    owner_key="alice",
+                    title="自定义作业",
+                    due_at=datetime(2026, 6, 1, 20, 0),
+                )
+                self.assertEqual([item.title for item in list_todos(session, owner_key="alice")], ["自定义作业"])
+                set_manual_assignment_completed(
+                    session,
+                    owner_key="alice",
+                    assignment_id=assignment.id,
+                    completed=True,
+                )
+                self.assertEqual(list_todos(session, owner_key="alice"), [])
+
+    def test_recurring_manual_assignment_advances_one_visible_period(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = test_settings(f"sqlite:///{Path(tmpdir) / 'homework.sqlite3'}")
+            init_db(settings)
+            session_factory = create_session_factory(settings)
+
+            with session_factory() as session:
+                assignment = add_manual_assignment(
+                    session,
+                    owner_key="alice",
+                    title="每周总结",
+                    due_at=datetime(2026, 6, 1, 20, 0),
+                    recurrence="weekly",
+                )
+                self.assertEqual(
+                    [(item.title, item.due_at) for item in list_todos(session, owner_key="alice")],
+                    [("每周总结", datetime(2026, 6, 1, 20, 0))],
+                )
+                set_manual_assignment_completed(
+                    session,
+                    owner_key="alice",
+                    assignment_id=assignment.id,
+                    completed=True,
+                )
+                self.assertEqual(
+                    [(item.title, item.due_at) for item in list_todos(session, owner_key="alice")],
+                    [("每周总结", datetime(2026, 6, 8, 20, 0))],
+                )
+                self.assertEqual(len(list_assignments(session, owner_key="alice")), 2)
 
 
 if __name__ == "__main__":
