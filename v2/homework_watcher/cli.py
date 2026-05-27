@@ -51,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     diagnose_xiaoya_parser.add_argument("--user", default="default", help="账号学号，默认 default")
     diagnose_xiaoya_parser.set_defaults(handler=cmd_diagnose_xiaoya)
 
+    diagnose_xiaoya_click_parser = subparsers.add_parser(
+        "diagnose-xiaoya-click-discovery", help="只通过点击课程卡片诊断小雅 course_id 发现"
+    )
+    diagnose_xiaoya_click_parser.add_argument("--user", default="default", help="账号学号，默认 default")
+    diagnose_xiaoya_click_parser.set_defaults(handler=cmd_diagnose_xiaoya_click_discovery)
+
     args = parser.parse_args(argv)
     if not hasattr(args, "handler"):
         parser.print_help()
@@ -125,6 +131,21 @@ def cmd_discover_xiaoya_courses(args) -> int:
     output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print_course_table(rows)
     print(f"saved_json={output_path}")
+    return 0 if courses else 1
+
+
+def cmd_diagnose_xiaoya_click_discovery(args) -> int:
+    settings = load_settings()
+    config = load_platform_configs(settings.config_path).get("xiaoya")
+    if config is None:
+        print("xiaoya platform config not found")
+        return 1
+    courses = XiaoyaScanner(settings).discover_courses_by_click_url_only(
+        config,
+        user_key=args.user,
+        emit=print,
+    )
+    print_course_table([xiaoya_course_to_dict(course) for course in courses])
     return 0 if courses else 1
 
 
@@ -213,7 +234,7 @@ def compact_text(value: str) -> str:
 
 
 def print_course_table(rows: list[dict[str, str]]) -> None:
-    columns = ["course", "course_id", "task_url", "source"]
+    columns = ["course", "course_id", "source", "task_url"]
     if not rows:
         print("\t".join(columns))
         return

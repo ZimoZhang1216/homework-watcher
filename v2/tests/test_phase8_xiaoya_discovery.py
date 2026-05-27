@@ -5,16 +5,19 @@ import unittest
 from homework_watcher.config_loader import KnownCourseConfig, parse_platform_config
 from homework_watcher.scanners.xiaoya_discovery import (
     build_xiaoya_task_url,
+    click_url_course_to_raw_candidate,
     collect_xiaoya_network_payload,
     course_name_candidates,
     course_name_from_card_candidate,
     course_name_from_card_text,
     dedupe_course_card_candidates,
+    extract_course_id,
     extract_course_id_from_raw,
     extract_course_name_from_raw,
     expected_course_count_from_text,
     merge_xiaoya_courses,
     normalize_known_xiaoya_course,
+    normalize_discovered_xiaoya_course,
     raw_course_candidates_from_network_payloads,
     should_resolve_course_cards_by_click,
 )
@@ -143,6 +146,42 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
             task_url,
             "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902425978165806721/task",
         )
+
+    def test_click_url_candidate_uses_internal_course_url_id(self) -> None:
+        task_url = build_xiaoya_task_url(
+            "https://nankai.ai-augmented.com/app/jx-web/mycourse",
+            "6902426104825404425",
+            href="https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426104825404425/resource",
+        )
+        raw = click_url_course_to_raw_candidate(
+            course_name="国家安全教育",
+            course_id="6902426104825404425",
+            task_url=task_url,
+            card_text="国家安全教育 课程内容 作业任务 课程工具",
+        )
+        normalized = normalize_discovered_xiaoya_course(
+            KnownCourseConfig(
+                course=extract_course_name_from_raw(raw, course_id="6902426104825404425"),
+                course_id=extract_course_id_from_raw(raw),
+                task_url=raw["href"],
+                source=raw["source"],
+            )
+        )
+
+        self.assertEqual(extract_course_id_from_raw(raw), "6902426104825404425")
+        self.assertEqual(extract_course_name_from_raw(raw, course_id="6902426104825404425"), "国家安全教育")
+        self.assertEqual(task_url, "https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426104825404425/task")
+        self.assertEqual(normalized.source, "click_url")
+
+    def test_extract_course_id_from_any_internal_mycourse_page(self) -> None:
+        for suffix in ["resource", "task", "tool", "overview", "notice", "learning"]:
+            with self.subTest(suffix=suffix):
+                self.assertEqual(
+                    extract_course_id(
+                        f"https://nankai.ai-augmented.com/app/jx-web/mycourse/6902426104825404425/{suffix}"
+                    ),
+                    "6902426104825404425",
+                )
 
     def test_non_numeric_mycourse_segment_is_not_course_id(self) -> None:
         raw = {
@@ -337,7 +376,7 @@ class Phase8XiaoyaDiscoveryTests(unittest.TestCase):
                 "1 2 2026年春 校内公开 教务开课 LPOC 国家安全教育 "
                 "学院：教务部 许晓,王存刚 52232次 4181人 2026年春 校内公开 教务开课"
             ),
-            "LPOC 国家安全教育",
+            "国家安全教育",
         )
         self.assertEqual(
             course_name_from_card_text(

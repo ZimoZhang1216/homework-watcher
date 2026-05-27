@@ -15,6 +15,7 @@ from homework_watcher.scanners.xiaoya_discovery import (
     XIAOYA_DEFAULT_MYCOURSE_URL,
     XiaoyaCourseDiscoverer,
     build_xiaoya_task_url,
+    discover_xiaoya_courses_by_click_url,
     merge_xiaoya_courses,
 )
 from homework_watcher.settings import Settings, load_settings
@@ -402,6 +403,32 @@ class XiaoyaScanner:
                     page,
                     mycourse_url=config.mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL,
                     scan_id=scan_id,
+                    emit=emit,
+                )
+            finally:
+                browser_context.close()
+
+    def discover_courses_by_click_url_only(
+        self,
+        config,
+        *,
+        user_key: str,
+        emit: Callable[[str], None] | None = None,
+    ) -> list[KnownCourseConfig]:
+        profile_dir = self.profile_dir_for_user(user_key)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            browser_context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=self.headless,
+                viewport={"width": 1400, "height": 1000},
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+                return discover_xiaoya_courses_by_click_url(
+                    page,
+                    mycourse_url=config.mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL,
                     emit=emit,
                 )
             finally:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from datetime import timedelta
@@ -93,6 +94,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     diagnose_web_parser.add_argument("--user-id", type=int, default=1, help="Web 用户 ID，默认 1")
     diagnose_web_parser.add_argument("--json", action="store_true", help="输出 JSON 诊断结果")
     diagnose_web_parser.set_defaults(handler=cmd_diagnose_web_xiaoya_structure)
+
+    diagnose_xiaoya_click_parser = subparsers.add_parser(
+        "diagnose-xiaoya-click-discovery",
+        help="转发到 v2，只通过点击课程卡片诊断小雅 course_id 发现",
+    )
+    diagnose_xiaoya_click_parser.add_argument("--user", default="default", help="账号学号，默认 default")
+    diagnose_xiaoya_click_parser.set_defaults(handler=cmd_diagnose_xiaoya_click_discovery)
 
     check_parser = subparsers.add_parser("check", help="检查临近截止和逾期作业，并输出每日汇总")
     check_parser.add_argument("--scan", action="store_true", help="提醒前先用 Playwright 扫描平台作业")
@@ -395,6 +403,28 @@ def query_assignment_schema(db: HomeworkDB) -> dict:
     return {"table_sql": table_sql, "indexes": indexes}
 
 
+def cmd_diagnose_xiaoya_click_discovery(args) -> int:
+    project_root = Path(__file__).resolve().parents[1]
+    v2_root = project_root / "v2"
+    if not v2_root.exists():
+        raise RuntimeError("未找到 v2 目录，无法运行小雅点击发现诊断")
+    v2_python = v2_root / ".venv" / "bin" / "python"
+    python_executable = str(v2_python) if v2_python.exists() else sys.executable
+    completed = subprocess.run(
+        [
+            python_executable,
+            "-m",
+            "homework_watcher.cli",
+            "diagnose-xiaoya-click-discovery",
+            "--user",
+            args.user,
+        ],
+        cwd=v2_root,
+        check=False,
+    )
+    return completed.returncode
+
+
 def cmd_check(args) -> int:
     db = open_db(args)
     notifier = Notifier(enabled=not args.no_notify)
@@ -594,3 +624,7 @@ def print_scan_records(records: list[dict]) -> None:
             f"{action} #{assignment.id} [{item.platform}] {item.title} "
             f"截止 {human_datetime(item.due_at)} 状态 {item.status}{url}"
         )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

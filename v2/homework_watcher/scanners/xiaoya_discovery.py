@@ -80,6 +80,9 @@ MAX_NETWORK_JSON_BYTES = 2_000_000
 MAX_NETWORK_PAYLOADS = 120
 DISCOVERY_LOAD_TIMEOUT_MS = 15000
 DISCOVERY_EXTRACT_TIMEOUT_MS = 15000
+CLICK_DISCOVERY_TIMEOUT_MS = 120000
+CLICK_COURSE_TIMEOUT_MS = 8000
+CLICK_CANDIDATE_WAIT_MS = 6000
 DOM_COURSE_WAIT_MS = 6000
 NETWORK_SETTLE_MS = 2000
 MAX_COURSE_LIST_PAGES = 10
@@ -90,9 +93,17 @@ COURSE_ACTION_PHRASES = (
     "查看课程",
     "开始学习",
     "继续学习",
+    "课程内容",
+    "作业任务",
+    "课程工具",
+    "我的学情",
+    "课程画像",
+    "课程概况",
+    "公告&日志",
+    "按钮文字",
     "进入",
 )
-COURSE_ACTION_WORDS = {"查看", "任务", "作业", "学习"}
+COURSE_ACTION_WORDS = {"查看", "任务", "作业", "学习", "Q&A"}
 COURSE_NAME_NOISE = {
     "我的课程",
     "课程列表",
@@ -203,7 +214,7 @@ class XiaoyaCourseDiscoverer:
                     course=course,
                     course_id=course_id,
                     task_url=task_url,
-                    source="discovered",
+                    source=str(raw.get("source") or "discovered"),
                 )
                 discovered.append(candidate)
                 seen_course_ids.add(course_id)
@@ -228,7 +239,7 @@ class XiaoyaCourseDiscoverer:
                 mycourse_url=url,
                 existing_course_ids=seen_course_ids,
                 seed_candidates=raw_candidates,
-                deadline=extract_deadline,
+                deadline=monotonic_time.monotonic() + CLICK_DISCOVERY_TIMEOUT_MS / 1000,
                 emit=emit,
             )
             if click_resolved_candidates:
@@ -268,6 +279,42 @@ def discover_xiaoya_courses(
         scan_id=scan_id,
         emit=emit,
     )
+
+
+def discover_xiaoya_courses_by_click_url(
+    page: Page,
+    *,
+    mycourse_url: str = XIAOYA_DEFAULT_MYCOURSE_URL,
+    emit: Callable[[str], None] | None = None,
+) -> list[KnownCourseConfig]:
+    raw_candidates = resolve_course_cards_by_clicking(
+        page,
+        mycourse_url=mycourse_url or XIAOYA_DEFAULT_MYCOURSE_URL,
+        existing_course_ids=set(),
+        seed_candidates=[],
+        deadline=monotonic_time.monotonic() + CLICK_DISCOVERY_TIMEOUT_MS / 1000,
+        emit=emit,
+    )
+    courses: list[KnownCourseConfig] = []
+    seen_ids: set[str] = set()
+    for raw in raw_candidates:
+        course_id = extract_course_id_from_raw(raw)
+        if not course_id or course_id in seen_ids:
+            continue
+        course_name = extract_course_name_from_raw(raw, course_id=course_id)
+        if not course_name:
+            continue
+        task_url = build_xiaoya_task_url(mycourse_url, course_id, href=raw_href(raw))
+        courses.append(
+            KnownCourseConfig(
+                course=course_name,
+                course_id=course_id,
+                task_url=task_url,
+                source=str(raw.get("source") or "click_url"),
+            )
+        )
+        seen_ids.add(course_id)
+    return courses
 
 
 def merge_xiaoya_courses(
@@ -399,41 +446,69 @@ def resolve_course_cards_by_clicking(
     seen_course_ids = set(existing_course_ids)
     attempted_names: set[str] = set()
     seen_page_keys: set[str] = set()
+    emitted_start = False
 
     for list_page_no in range(1, MAX_COURSE_LIST_PAGES + 1):
+        if not emitted_start:
+            emit_discovery(emit, "[xiaoya-click-discover] start")
+            emitted_start = True
         if deadline is not None and remaining_deadline_ms(deadline) <= 0:
-            emit_discovery(emit, "[xiaoya-discover] click fallback timeout")
+            emit_discovery(emit, "[xiaoya-click-discover] skipped reason=timeout")
             break
         if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
-            emit_discovery(emit, f"[xiaoya-discover] click fallback unable to open list page={list_page_no}")
+            emit_discovery(
+                emit,
+                f"[xiaoya-click-discover] skipped reason=open_list_failed list_page={list_page_no}",
+            )
             break
 
         page_text = read_xiaoya_body_text(page)
         page_key = compact_text_key(page_text)
         if page_key in seen_page_keys:
-            emit_discovery(emit, f"[xiaoya-discover] click fallback repeated list page={list_page_no}")
+            emit_discovery(
+                emit,
+                f"[xiaoya-click-discover] skipped reason=repeated_list_page list_page={list_page_no}",
+            )
             break
         seen_page_keys.add(page_key)
 
-        page_candidates = []
-        if list_page_no == 1:
-            page_candidates.extend(seed_candidates or [])
-        page_candidates.extend(evaluate_course_candidates(page))
-        page_candidates.extend(evaluate_clickable_course_cards(page))
-        cards = dedupe_course_card_candidates(page_candidates)
-        emit_discovery(
-            emit,
-            f"[xiaoya-discover] click fallback list_page={list_page_no} card candidates={len(cards)}",
+        cards = wait_for_xiaoya_click_course_candidates(
+            page,
+            timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, remaining_deadline_ms(deadline)),
+            seed_candidates=seed_candidates if list_page_no == 1 else None,
         )
+        emit_discovery(emit, f"[xiaoya-click-discover] candidate_count={len(cards)} list_page={list_page_no}")
         if not cards:
             break
 
         page_available = True
-        for card in cards:
+        while True:
+            if deadline is not None and remaining_deadline_ms(deadline) <= 0:
+                emit_discovery(emit, "[xiaoya-click-discover] skipped reason=timeout")
+                page_available = False
+                break
+            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
+                page_available = False
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-click-discover] skipped reason=return_list_failed list_page={list_page_no}",
+                )
+                break
+            cards = wait_for_xiaoya_click_course_candidates(
+                page,
+                timeout_ms=min(CLICK_CANDIDATE_WAIT_MS, remaining_deadline_ms(deadline)),
+                seed_candidates=seed_candidates if list_page_no == 1 else None,
+            )
+            card = next_unattempted_click_card(cards, attempted_names)
+            if card is None:
+                break
             course_name = course_name_from_card_candidate(card)
             if not course_name:
+                attempted_names.add(f"unknown:{len(attempted_names)}")
+                emit_discovery(emit, "[xiaoya-click-discover] skipped reason=no_course_name")
                 continue
             name_key = normalize_course_name(course_name)
+            attempted_names.add(name_key)
             course_id = extract_course_id_from_raw(card)
             if course_id:
                 if course_id not in seen_course_ids:
@@ -448,58 +523,64 @@ def resolve_course_cards_by_clicking(
                     seen_course_ids.add(course_id)
                     emit_discovery(
                         emit,
-                        f"[xiaoya-discover] direct card candidate course={sanitize_log_value(course_name)} "
-                        f"course_id={course_id}",
+                        f"[xiaoya-click-discover] extracted course={sanitize_log_value(course_name)} "
+                        f"course_id={course_id} task_url={sanitize_url_for_log(build_xiaoya_task_url(mycourse_url, course_id, href=raw_href(card)))}",
                     )
-                attempted_names.add(name_key)
                 continue
-            if name_key in attempted_names:
-                continue
-            attempted_names.add(name_key)
 
+            click_index = str(card.get("click_index") or "")
             emit_discovery(
                 emit,
-                f"[xiaoya-discover] resolving card by click page={list_page_no} "
-                f"course={sanitize_log_value(course_name)}",
+                f"[xiaoya-click-discover] candidate index={sanitize_log_value(click_index or '?')} "
+                f"text={sanitize_log_value(raw_text_hint(card), limit=220)}",
             )
-            if not open_xiaoya_course_list_page(page, mycourse_url, page_no=list_page_no, deadline=deadline):
-                page_available = False
-                break
-            if not click_xiaoya_course_card(page, course_name):
+            before_url = str(getattr(page, "url", "") or "")
+            emit_discovery(emit, f"[xiaoya-click-discover] before_url={sanitize_url_for_log(before_url)}")
+            clicked = False
+            if click_index:
+                clicked = click_xiaoya_course_card_by_index(page, click_index)
+            if not clicked:
+                clicked = click_xiaoya_course_card(page, course_name)
+            if not clicked:
                 emit_discovery(
                     emit,
-                    f"[xiaoya-discover] click target not found course={sanitize_log_value(course_name)}",
+                    f"[xiaoya-click-discover] skipped reason=click_failed course={sanitize_log_value(course_name)}",
                 )
                 continue
             course_id = wait_for_course_id_after_click(
                 page,
-                timeout_ms=min(8000, remaining_deadline_ms(deadline)) if deadline is not None else 8000,
+                timeout_ms=min(CLICK_COURSE_TIMEOUT_MS, remaining_deadline_ms(deadline))
+                if deadline is not None
+                else CLICK_COURSE_TIMEOUT_MS,
+                before_url=before_url,
             )
+            after_url = str(getattr(page, "url", "") or "")
+            emit_discovery(emit, f"[xiaoya-click-discover] after_url={sanitize_url_for_log(after_url)}")
             if not course_id:
                 emit_discovery(
                     emit,
-                    f"[xiaoya-discover] click did not expose course_id course={sanitize_log_value(course_name)}",
+                    f"[xiaoya-click-discover] skipped reason=no_course_id course={sanitize_log_value(course_name)}",
                 )
                 continue
             if course_id in seen_course_ids:
-                emit_discovery(emit, f"[xiaoya-discover] duplicate clicked course_id skipped course_id={course_id}")
+                emit_discovery(
+                    emit,
+                    f"[xiaoya-click-discover] skipped reason=duplicate course_id={course_id}",
+                )
                 continue
-            task_url = build_xiaoya_task_url(mycourse_url, course_id, href=getattr(page, "url", ""))
+            task_url = build_xiaoya_task_url(mycourse_url, course_id, href=after_url)
             resolved.append(
-                {
-                    "href": task_url,
-                    "absolute_href": task_url,
-                    "text": course_name,
-                    "attrs": f"clicked course_id={course_id}",
-                    "ancestor_texts": [str(card.get("text") or "")],
-                    "ancestor_attrs": [],
-                    "title_texts": [course_name],
-                }
+                click_url_course_to_raw_candidate(
+                    course_name=course_name,
+                    course_id=course_id,
+                    task_url=task_url,
+                    card_text=raw_text_hint(card),
+                )
             )
             seen_course_ids.add(course_id)
             emit_discovery(
                 emit,
-                f"[xiaoya-discover] clicked candidate course={sanitize_log_value(course_name)} "
+                f"[xiaoya-click-discover] extracted course={sanitize_log_value(course_name)} "
                 f"course_id={course_id} task_url={sanitize_url_for_log(task_url)}",
             )
 
@@ -510,7 +591,32 @@ def resolve_course_cards_by_clicking(
         if not click_next_xiaoya_course_list_page(page):
             break
 
-    return dedupe_raw_course_candidates(resolved)
+    unique = dedupe_raw_course_candidates(resolved)
+    emit_discovery(emit, f"[xiaoya-click-discover] discovered_count={len(unique)}")
+    return unique
+
+
+def wait_for_xiaoya_click_course_candidates(
+    page: Page,
+    *,
+    timeout_ms: int,
+    seed_candidates: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    deadline = monotonic_time.monotonic() + max(timeout_ms, 1000) / 1000
+    last_dom_candidates: list[dict[str, Any]] = []
+    while monotonic_time.monotonic() < deadline:
+        last_dom_candidates = collect_xiaoya_click_course_candidates(page)
+        if last_dom_candidates:
+            return dedupe_course_card_candidates((seed_candidates or []) + last_dom_candidates)
+        page.wait_for_timeout(300)
+    return dedupe_course_card_candidates((seed_candidates or []) + last_dom_candidates)
+
+
+def collect_xiaoya_click_course_candidates(page: Page) -> list[dict[str, Any]]:
+    page_candidates = []
+    page_candidates.extend(evaluate_course_candidates(page))
+    page_candidates.extend(evaluate_clickable_course_cards(page))
+    return dedupe_course_card_candidates(page_candidates)
 
 
 def open_xiaoya_course_list_page(
@@ -619,6 +725,36 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                 element.getAttribute('data-xy-click-pt') === 'enter-course' ||
                 String(element.className || '').includes('aia_course_card')
               );
+              const strongClickable = element => Boolean(element) && (
+                element.matches('a[href],button,[role="button"],[onclick]') ||
+                element.getAttribute('data-xy-click-pt') === 'enter-course'
+              );
+              const weakClickable = element => Boolean(element) && (
+                strongClickable(element) ||
+                element.matches('[tabindex]') ||
+                /cover|title|course|card|item/i.test(String(element.className || ''))
+              );
+              const clickTargetFor = element => {
+                const courseRoot = element.closest(
+                  '[data-xy-click-pt="enter-course"], .aia_course_card, [class*="course-card"], [class*="courseCard"], [class*="CourseCard"], [class*="course-item"], [class*="course_item"], .ant-card'
+                ) || element;
+                const clickables = [
+                  element,
+                  ...Array.from(courseRoot.querySelectorAll(
+                    'a[href],button,[role="button"],[onclick],[tabindex],[class*="cover"],[class*="Cover"],[class*="title"],[class*="Title"],[class*="course"],[class*="card"]'
+                  )),
+                  courseRoot,
+                ];
+                let current = courseRoot.parentElement;
+                for (let depth = 0; current && depth < 3; depth += 1) {
+                  clickables.push(current);
+                  current = current.parentElement;
+                }
+                return clickables.find(node => visible(node) && strongClickable(node)) ||
+                  clickables.find(node => visible(node) && weakClickable(node)) ||
+                  clickables.find(node => visible(node)) ||
+                  courseRoot;
+              };
               const courseContext = text => /学院[:：]|校内公开|教务开课|\\d+次\\s+\\d+人|202\\d年/.test(text || '');
               const navNoise = text => /我的课程.*收藏的课.*访问的课|加入课程.*创建课程.*正在进行|待完成任务.*未读消息|用户协议|隐私政策/.test(text || '');
               const isCandidate = element => {
@@ -647,6 +783,12 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                 'article',
                 'section',
                 'li',
+                '[role="button"]',
+                '[onclick]',
+                '[class*="cover"]',
+                '[class*="Cover"]',
+                '[class*="title"]',
+                '[class*="Title"]',
                 'a[href*="/mycourse"]',
                 'div'
               ];
@@ -666,7 +808,10 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                   return Math.round(ar.top - br.top) || Math.round(ar.left - br.left);
                 })
                 .slice(0, 80)
-                .map(element => {
+                .map((element, index) => {
+                  const target = clickTargetFor(element);
+                  const clickIndex = String(index);
+                  try { target.setAttribute('data-hw-xiaoya-click-index', clickIndex); } catch {}
                   const name = clickName(element);
                   const text = readableText(element).slice(0, 900);
                   const titleTexts = Array.from(
@@ -684,6 +829,8 @@ def evaluate_clickable_course_cards(page: Page) -> list[dict[str, Any]]:
                     ancestor_texts: [text],
                     ancestor_attrs: [],
                     title_texts: titleTexts,
+                    click_index: clickIndex,
+                    click_target_text: readableText(target).slice(0, 300),
                   };
                 });
             }
@@ -787,6 +934,66 @@ def course_card_to_raw_candidate(
     }
 
 
+def click_url_course_to_raw_candidate(
+    *, course_name: str, course_id: str, task_url: str, card_text: str = ""
+) -> dict[str, Any]:
+    return {
+        "href": task_url,
+        "absolute_href": task_url,
+        "text": course_name,
+        "attrs": f"source=click_url course_id={course_id}",
+        "ancestor_texts": [card_text] if card_text else [],
+        "ancestor_attrs": [],
+        "title_texts": [course_name],
+        "source": "click_url",
+    }
+
+
+def next_unattempted_click_card(
+    cards: list[dict[str, Any]], attempted_names: set[str]
+) -> dict[str, Any] | None:
+    for card in cards:
+        course_name = course_name_from_card_candidate(card)
+        if not course_name:
+            continue
+        if normalize_course_name(course_name) in attempted_names:
+            continue
+        return card
+    return None
+
+
+def click_xiaoya_course_card_by_index(page: Page, click_index: str) -> bool:
+    if not click_index:
+        return False
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (clickIndex) => {
+                  const target = document.querySelector(`[data-hw-xiaoya-click-index="${clickIndex}"]`);
+                  if (!target) return false;
+                  const visible = element => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  if (!visible(target)) return false;
+                  target.scrollIntoView({block: 'center', inline: 'center'});
+                  target.dispatchEvent(new MouseEvent('mouseover', {bubbles: true, cancelable: true}));
+                  target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                  target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                  target.click();
+                  return true;
+                }
+                """,
+                click_index,
+            )
+        )
+    except Exception:
+        return False
+
+
 def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
     try:
         return bool(
@@ -875,27 +1082,38 @@ def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
                   if (!card) return false;
                   const courseCard = card.closest('[data-xy-click-pt="enter-course"], .aia_course_card') || card;
                   const clickables = [
-                    courseCard,
                     card,
-                    ...Array.from(courseCard.querySelectorAll('a[href],button,[role="button"],[onclick],[tabindex],[class*="course"],[class*="card"]')),
+                    ...Array.from(courseCard.querySelectorAll('a[href],button,[role="button"],[onclick],[tabindex],[class*="cover"],[class*="Cover"],[class*="title"],[class*="Title"],[class*="course"],[class*="card"]')),
+                    courseCard,
                   ];
                   let current = courseCard.parentElement;
                   for (let depth = 0; current && depth < 4; depth += 1) {
                     clickables.push(current);
                     current = current.parentElement;
                   }
-                  const target = clickables.find(element => {
+                  const strongClickable = element => Boolean(element) && (
+                    element.matches('a[href],button,[role="button"],[onclick]') ||
+                    element.getAttribute('data-xy-click-pt') === 'enter-course'
+                  );
+                  const weakClickable = element => Boolean(element) && (
+                    strongClickable(element) ||
+                    element.matches('[tabindex]') ||
+                    /cover|title|course|card|item/i.test(String(element.className || ''))
+                  );
+                  const canTarget = (element, matcher) => {
                     if (!visible(element)) return false;
                     const text = readableText(element);
-                    const signal = element.matches('a[href],button,[role="button"],[onclick],[tabindex]') ||
-                      /course|card|item/i.test(String(element.className || ''));
-                    return signal && (
+                    return matcher(element) && (
                       sameCourse(clickName(element), courseName) ||
                       sameCourse(text, courseName) ||
                       courseCard.contains(element) ||
                       element.contains(courseCard)
                     );
-                  }) || courseCard;
+                  };
+                  const target = clickables.find(element => canTarget(element, strongClickable)) ||
+                    clickables.find(element => canTarget(element, weakClickable)) ||
+                    clickables.find(element => visible(element)) ||
+                    courseCard;
                   target.scrollIntoView({block: 'center', inline: 'center'});
                   target.click();
                   return true;
@@ -908,11 +1126,12 @@ def click_xiaoya_course_card(page: Page, course_name: str) -> bool:
         return False
 
 
-def wait_for_course_id_after_click(page: Page, *, timeout_ms: int = 8000) -> str:
+def wait_for_course_id_after_click(page: Page, *, timeout_ms: int = 8000, before_url: str = "") -> str:
     deadline = monotonic_time.monotonic() + max(timeout_ms, 1000) / 1000
     while monotonic_time.monotonic() < deadline:
-        course_id = extract_course_id(str(getattr(page, "url", "") or ""))
-        if course_id:
+        current_url = str(getattr(page, "url", "") or "")
+        course_id = extract_course_id(current_url)
+        if course_id and (not before_url or current_url != before_url):
             return course_id
         page.wait_for_timeout(300)
     return extract_course_id(str(getattr(page, "url", "") or ""))
@@ -1434,10 +1653,14 @@ def course_name_fragments(line: str) -> list[str]:
 
 def normalize_course_name(value: str) -> str:
     text = re.sub(r"\s+", " ", value).strip(" /\\|·-_:：")
+    text = re.sub(r"\bLPOC\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bQ\s*&\s*A\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b202\d\s*(?:春|夏|秋|冬)\b", " ", text)
     for phrase in COURSE_ACTION_PHRASES:
         text = text.replace(phrase, " ")
     for word in COURSE_ACTION_WORDS:
         text = re.sub(rf"(^|\s){re.escape(word)}(\s|$)", " ", text)
+    text = re.sub(r"\b202\d\s*(?:春|夏|秋|冬)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" /\\|·-_:：")
     return text
 
