@@ -120,6 +120,12 @@ class Phase9ScanProgressTests(unittest.TestCase):
         )
 
         self.assertIn("距今时间", table)
+        self.assertIn('class="assignment-table"', table)
+        self.assertIn('aria-label="移动端待办列表"', table)
+        self.assertIn('<details class="assignment-card">', table)
+        self.assertIn("<summary>", table)
+        self.assertIn("作业-08", table)
+        self.assertIn("小雅 · 结构化学", table)
         self.assertIn('data-label="课程"', table)
         self.assertNotIn("最后发现", table)
 

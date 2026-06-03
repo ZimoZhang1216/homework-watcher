@@ -888,11 +888,59 @@ def render_assignment_table(
             "</tr>"
         )
     return (
-        "<table>"
+        '<div class="assignment-list-wrap">'
+        '<table class="assignment-table">'
         "<thead><tr><th>平台</th><th>课程</th><th>标题</th><th>状态</th><th>截止时间</th><th>距今时间</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
+        f"{render_assignment_mobile_list(assignments, allow_manual_completion=allow_manual_completion)}"
+        "</div>"
     )
+
+
+def render_assignment_mobile_list(
+    assignments: list[dict[str, object]],
+    *,
+    allow_manual_completion: bool,
+) -> str:
+    cards = []
+    for item in assignments:
+        title = escape(str(item.get("title") or "未命名作业"))
+        platform = escape(str(item.get("platform") or ""))
+        course = escape(str(item.get("course") or ""))
+        status_raw = str(item.get("status_raw") or "")
+        due_at = str(item.get("due_at") or "")
+        due_distance = format_due_distance(item.get("due_at")) or "未设置"
+        url = str(item.get("url") or "")
+        status = (
+            render_manual_completion_control(item)
+            if allow_manual_completion and is_manual_assignment_dict(item)
+            else f'<span class="assignment-status">{escape(status_raw)}</span>'
+        )
+        link = (
+            f'<a class="button-link compact-link" href="{escape(url)}" target="_blank" rel="noreferrer">打开作业</a>'
+            if url
+            else ""
+        )
+        cards.append(
+            f"""
+            <details class="assignment-card">
+              <summary>
+                <span class="assignment-card-main">
+                  <strong>{title}</strong>
+                  <span>{platform}{' · ' if platform and course else ''}{course}</span>
+                </span>
+                <span class="assignment-card-due">{escape(due_distance)}</span>
+              </summary>
+              <div class="assignment-card-detail">
+                <div><span class="label">状态</span>{status}</div>
+                <div><span class="label">截止</span><span>{escape(due_at)}</span></div>
+                {f'<div><span class="label">操作</span>{link}</div>' if link else ''}
+              </div>
+            </details>
+            """
+        )
+    return f'<div class="assignment-mobile-list" aria-label="移动端待办列表">{"".join(cards)}</div>'
 
 
 def render_manual_completion_control(item: dict[str, object]) -> str:
@@ -1078,6 +1126,8 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     th, td {{ text-align: left; padding: 13px 10px; border-top: 1px solid var(--border); vertical-align: top; }}
     th {{ color: var(--muted); font-size: 13px; font-weight: 800; }}
     tbody tr:hover {{ background: var(--surface-subtle); }}
+    .assignment-mobile-list {{ display: none; }}
+    .assignment-status {{ font-weight: 800; color: var(--text); }}
     a {{ color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 3px; }}
     a:hover {{ color: var(--primary-strong); }}
     button, .button-link {{
@@ -1105,6 +1155,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     }}
     button.secondary:hover, .button-link:hover {{ background: var(--primary-soft); color: var(--primary-strong); }}
     button.compact {{ min-height: 32px; padding: 0 10px; border-radius: 7px; }}
+    .compact-link {{ min-height: 34px; padding: 0 11px; border-radius: 7px; font-size: 14px; }}
     .primary-link {{ background: var(--primary); color: var(--on-primary); box-shadow: var(--shadow-soft); }}
     .primary-link:hover {{ border-color: var(--primary-strong); background: var(--primary-strong); color: var(--on-primary); }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
@@ -1273,27 +1324,97 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       .progress-actions button {{ width: 100%; }}
       .account {{ flex-wrap: wrap; }}
       .account button.compact {{ width: auto; }}
-      table {{ min-width: 0; }}
-      thead {{ display: none; }}
-      tbody, tr, td {{ display: block; }}
-      tbody tr {{
+      .assignment-table {{ display: none; }}
+      .assignment-mobile-list {{
+        display: grid;
+        gap: 10px;
+        margin-top: 12px;
+      }}
+      .assignment-card {{
         border: 1px solid var(--border);
         border-radius: 8px;
-        padding: 10px 12px;
         background: var(--surface-subtle);
+        overflow: hidden;
       }}
-      tbody tr + tr {{ margin-top: 12px; }}
-      td {{
+      .assignment-card summary {{
         display: grid;
-        grid-template-columns: 82px minmax(0, 1fr);
-        gap: 10px;
-        border-top: 0;
-        padding: 8px 0;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "main due"
+          "main toggle";
+        gap: 5px 12px;
+        align-items: center;
+        min-height: 64px;
+        padding: 12px;
+        cursor: pointer;
+        list-style: none;
       }}
-      td::before {{
-        content: attr(data-label);
-        color: var(--muted);
+      .assignment-card summary::-webkit-details-marker {{ display: none; }}
+      .assignment-card summary::after {{
+        content: "展开";
         font-weight: 800;
+        color: var(--primary);
+        font-size: 13px;
+        grid-area: toggle;
+        justify-self: end;
+      }}
+      .assignment-card[open] summary::after {{ content: "收起"; }}
+      .assignment-card-main {{
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+        grid-area: main;
+      }}
+      .assignment-card-main strong {{
+        color: var(--text);
+        font-size: 16px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }}
+      .assignment-card-main span {{
+        color: var(--muted);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }}
+      .assignment-card-due {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 68px;
+        max-width: 112px;
+        min-height: 32px;
+        padding: 0 9px;
+        border-radius: 999px;
+        border: 1px solid var(--border-strong);
+        background: var(--surface);
+        color: var(--primary);
+        font-weight: 900;
+        font-size: 13px;
+        text-align: center;
+        line-height: 1.25;
+        grid-area: due;
+        justify-self: end;
+      }}
+      .assignment-card-detail {{
+        display: grid;
+        gap: 8px;
+        padding: 0 12px 12px;
+      }}
+      .assignment-card-detail div {{
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+      }}
+      .assignment-card-detail .label {{
+        min-width: 0;
+        color: var(--muted);
+      }}
+      .assignment-card-detail span,
+      .assignment-card-detail a,
+      .assignment-card-detail form {{
+        min-width: 0;
+        overflow-wrap: anywhere;
       }}
       td a {{ overflow-wrap: anywhere; }}
       pre {{ max-height: 480px; font-size: 13px; }}
