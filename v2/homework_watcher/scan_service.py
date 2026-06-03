@@ -19,6 +19,12 @@ from .database import (
 )
 from .git_utils import git_commit
 from .logging_utils import get_scan_logger
+from .scan_errors import (
+    NEEDS_ACTION_STATUSES,
+    ScanErrorAdvice,
+    describe_scan_error_text,
+    describe_scan_exception,
+)
 from .scan_progress import ScanCancelled
 from .scanners import FakeScanner, PlatformScanner, ScannerContext
 from .scanners.changjiang_yuketang import ChangjiangYuketangScanner
@@ -39,6 +45,7 @@ class ScanResult:
     todos: list[dict[str, object]]
     owner_key: str = "default"
     platform_summaries: dict[str, dict[str, object]] = field(default_factory=dict)
+    error_details: list[dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -57,6 +64,7 @@ class ScanResult:
             "todos": self.todos,
             "owner_key": self.owner_key,
             "platform_summaries": self.platform_summaries,
+            "error_details": self.error_details,
         }
 
 
@@ -101,33 +109,42 @@ class ScanService:
         platform_keys = self._platform_keys(platforms)
         all_candidates: list[AssignmentCandidate] = []
         errors: list[str] = []
+        error_details: list[dict[str, object]] = []
         platform_summaries: dict[str, dict[str, object]] = {}
 
         for platform_key in platform_keys:
             scanner = self.scanners.get(platform_key)
             if scanner is None:
-                message = f"platform {platform_key} has no scanner"
-                errors.append(message)
-                self._log(scan_id, message)
+                advice = describe_scan_error_text(
+                    f"platform {platform_key} has no scanner",
+                    platform_key=platform_key,
+                )
+                append_scan_error(errors, error_details, advice)
+                self._log(scan_id, "platform failed %s", advice.technical_detail)
                 continue
 
+            def emit_progress(percent: int, message: str) -> None:
+                self._log(scan_id, "progress percent=%s message=%s", percent, message)
+                if progress:
+                    progress(percent, message)
+
+            context = ScannerContext(
+                scan_id=scan_id,
+                platform_key=platform_key,
+                platform_config=self.configs.get(platform_key),
+                user_key=self.user_key,
+                progress=emit_progress,
+            )
             self._log(scan_id, "platform start %s scanner=%s", platform_key, type(scanner).__name__)
             try:
-                def emit_progress(percent: int, message: str) -> None:
-                    self._log(scan_id, "progress percent=%s message=%s", percent, message)
-                    if progress:
-                        progress(percent, message)
-
-                context = ScannerContext(
-                    scan_id=scan_id,
-                    platform_key=platform_key,
-                    platform_config=self.configs.get(platform_key),
-                    user_key=self.user_key,
-                    progress=emit_progress,
-                )
                 candidates = scanner.scan(context)
                 platform_summaries.update(
                     {key: dict(value) for key, value in context.metadata.items()}
+                )
+                append_platform_summary_errors(
+                    errors,
+                    error_details,
+                    platform_summaries,
                 )
                 self._log(
                     scan_id,
@@ -141,9 +158,17 @@ class ScanService:
                 self._log(scan_id, "scan cancelled during platform %s", platform_key)
                 raise
             except Exception as exc:  # noqa: BLE001 - platform isolation is intentional.
-                message = f"{platform_key}: {type(exc).__name__}: {exc}"
-                errors.append(message)
-                self._log(scan_id, "platform failed %s", message)
+                platform_summaries.update(
+                    {key: dict(value) for key, value in context.metadata.items()}
+                )
+                append_platform_summary_errors(
+                    errors,
+                    error_details,
+                    platform_summaries,
+                )
+                advice = describe_scan_exception(exc, platform_key=platform_key)
+                append_scan_error(errors, error_details, advice)
+                self._log(scan_id, "platform failed %s", advice.technical_detail)
 
         normalized = list(all_candidates)
         filtered = [candidate for candidate in normalized if not is_fake_course_summary(candidate)]
@@ -215,6 +240,7 @@ class ScanService:
             todos=todos,
             owner_key=self.user_key,
             platform_summaries=platform_summaries,
+            error_details=error_details,
         )
         LAST_SCAN_RESULTS.append(result)
         del LAST_SCAN_RESULTS[:-5]
@@ -244,6 +270,36 @@ def latest_scan_result(owner_key: str | None = None) -> ScanResult | None:
         if result.owner_key == owner_key:
             return result
     return None
+
+
+def append_platform_summary_errors(
+    errors: list[str],
+    error_details: list[dict[str, object]],
+    platform_summaries: dict[str, dict[str, object]],
+) -> None:
+    for platform_key, summary in platform_summaries.items():
+        status = str(summary.get("status") or "").strip()
+        message = str(summary.get("message") or "").strip()
+        if status not in NEEDS_ACTION_STATUSES or not message:
+            continue
+        append_scan_error(
+            errors,
+            error_details,
+            describe_scan_error_text(message, platform_key=platform_key),
+        )
+
+
+def append_scan_error(
+    errors: list[str],
+    error_details: list[dict[str, object]],
+    advice: ScanErrorAdvice,
+) -> None:
+    detail = advice.to_dict()
+    identity = (detail.get("code"), detail.get("platform"), detail.get("summary"))
+    if any((item.get("code"), item.get("platform"), item.get("summary")) == identity for item in error_details):
+        return
+    error_details.append(detail)
+    errors.append(advice.to_text())
 
 
 def scanner_source_path(scanner_cls) -> str:

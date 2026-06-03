@@ -19,6 +19,7 @@ from homework_watcher.database import (
 )
 from homework_watcher.debug_dump import dump_debug_page
 from homework_watcher.remote_login import profile_dir_for_user_platform
+from homework_watcher.scan_errors import describe_scan_error_text
 from homework_watcher.scanners.xiaoya_discovery import (
     XIAOYA_DEFAULT_MYCOURSE_URL,
     XiaoyaCourseDiscoverer,
@@ -301,9 +302,14 @@ class XiaoyaScanner:
         }
         if hasattr(context, "metadata"):
             context.metadata["xiaoya"] = summary
-        if config is None or not config.enabled:
+        if config is None:
+            summary["status"] = "needs_action"
+            summary["message"] = "小雅缺少平台配置，请检查 v2/config/platforms.yaml 中 xiaoya 配置是否存在并启用。"
+            context.emit(5, str(summary["message"]))
+            return []
+        if not config.enabled:
             summary["status"] = "skipped"
-            summary["message"] = "小雅未启用或缺少平台配置"
+            summary["message"] = "小雅未启用，已跳过"
             context.emit(5, "小雅：未启用，跳过")
             return []
 
@@ -332,15 +338,16 @@ class XiaoyaScanner:
             ),
         )
         if not merge.courses:
-            summary["status"] = "skipped"
-            summary["message"] = "小雅没有已保存课程，请先扫描课程"
-            context.emit(5, "小雅：没有已保存课程，请先扫描课程")
+            summary["status"] = "needs_action"
+            summary["message"] = "小雅没有已保存课程，请先点击“扫描课程”。如果刚扫描过课程仍为空，请重新完成小雅平台登录。"
+            context.emit(5, str(summary["message"]))
             return []
 
         profile_dir = self.profile_dir_for_user(context.user_key)
         profile_dir.mkdir(parents=True, exist_ok=True)
         context.emit(10, "小雅：打开浏览器登录态")
         results: list[AssignmentCandidate] = []
+        course_errors: list[str] = []
         with sync_playwright() as playwright:
             browser_context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
@@ -374,19 +381,24 @@ class XiaoyaScanner:
                         context.emit(percent, f"[xiaoya-task] parsed_count={len(items)}")
                         context.emit(percent, f"[xiaoya-task] todo candidates={sum(1 for item in items if item.is_todo)}")
                         context.emit(percent, f"[xiaoya-task] done course={course.course}")
-                    except PlaywrightTimeoutError:
+                    except PlaywrightTimeoutError as exc:
                         summary["failed_courses_count"] += 1
+                        message = f"小雅课程 {course.course} 页面加载超时"
+                        course_errors.append(f"{message}: {exc}")
                         context.emit(percent, f"[xiaoya-task] timeout course={course.course} skipped")
+                        context.emit(percent, describe_scan_error_text(message, platform_key="xiaoya").summary)
                     except Exception as exc:  # noqa: BLE001 - one course must not block the platform.
                         summary["failed_courses_count"] += 1
+                        message = f"小雅课程 {course.course}: {type(exc).__name__}: {exc}"
+                        course_errors.append(message)
                         context.emit(
                             percent,
                             f"[xiaoya-task] failed course={course.course} skipped "
                             f"type={type(exc).__name__} message={exc}",
                         )
-                summary["status"] = "succeeded"
-                summary["message"] = f"小雅完成，识别 {len(results)} 条作业"
-                context.emit(88, f"小雅：完成，识别 {len(results)} 条")
+                        context.emit(percent, describe_scan_error_text(message, platform_key="xiaoya").summary)
+                apply_xiaoya_task_summary(summary, results, course_errors)
+                context.emit(88, str(summary["message"]))
                 return results
             finally:
                 browser_context.close()
@@ -471,11 +483,11 @@ class XiaoyaScanner:
                 "inserted_courses_count": stats.inserted,
                 "updated_courses_count": stats.updated,
                 "skipped_courses_count": stats.skipped,
-                "status": "succeeded" if saved_courses else "skipped",
+                "status": "succeeded" if saved_courses else "needs_action",
                 "message": (
                     f"小雅课程扫描完成，已保存 {len(saved_courses)} 门课程"
                     if saved_courses
-                    else "小雅本轮未发现可保存课程，请确认登录态和课程页"
+                    else "小雅课程扫描没有发现可保存课程。请先在“平台登录”重新登录小雅，确认课程页能看到课程，再重新点击“扫描课程”。"
                 ),
             }
         )
@@ -693,6 +705,40 @@ class XiaoyaScanner:
         self, page: Page, course: KnownCourseConfig, text: str
     ) -> list[AssignmentCandidate]:
         return self.scan_task_page_content(page, course, text)
+
+
+def apply_xiaoya_task_summary(
+    summary: dict[str, object],
+    results: list[AssignmentCandidate],
+    course_errors: list[str],
+) -> None:
+    failed_count = int(summary.get("failed_courses_count") or 0)
+    scanned_count = int(summary.get("scanned_courses_count") or 0)
+    if failed_count and scanned_count == 0:
+        advice = describe_scan_error_text(
+            course_errors[0] if course_errors else "小雅课程扫描失败",
+            platform_key="xiaoya",
+        )
+        summary["status"] = "failed"
+        summary["message"] = advice.to_text()
+        return
+    if failed_count:
+        summary["status"] = "partial"
+        failed_examples = "、".join(extract_failed_course_names(course_errors)[:3])
+        suffix = f"失败课程：{failed_examples}。" if failed_examples else ""
+        summary["message"] = f"小雅部分课程扫描失败，已识别 {len(results)} 条作业。{suffix}可重新登录小雅后再扫描任务。"
+        return
+    summary["status"] = "succeeded"
+    summary["message"] = f"小雅完成，识别 {len(results)} 条作业"
+
+
+def extract_failed_course_names(course_errors: list[str]) -> list[str]:
+    names: list[str] = []
+    for error in course_errors:
+        match = re.search(r"小雅课程\s+(.+?)(?:\s+页面加载超时|:)", error)
+        if match:
+            names.append(match.group(1))
+    return names
 
 
 def scan_xiaoya_task_page(

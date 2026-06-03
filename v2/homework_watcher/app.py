@@ -34,6 +34,7 @@ from .database import (
 from .git_utils import git_commit
 from .logging_utils import read_latest_scan_log
 from .remote_login import RemoteLoginManager, build_novnc_url
+from .scan_errors import format_scan_failure
 from .scan_progress import ScanCancelled, ScanProgressStore
 from .scan_service import latest_scan_result
 from .settings import load_settings
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
                     <span class="count">{len(todos)}</span>
                   </div>
                   <p class="muted page-note">这里只显示未完成作业；已完成记录可在“查看所有记录”中确认。先用“扫描课程”保存小雅课程列表，再用“扫描任务”读取已登录平台的作业列表。</p>
+                  {render_scan_error_panel(request.query_params.get("scan_error", ""))}
                   {render_scan_guide()}
                   {render_assignment_table(todos)}
                   {render_manual_assignment_panel(request.query_params.get("manual_error", ""))}
@@ -196,9 +198,10 @@ def create_app() -> FastAPI:
         try:
             result = run_server_scan_command(settings, owner_key=user.username, mode="tasks")
         except ServerScanCommandError as exc:
+            message = format_scan_failure(exc.result, fallback=str(exc))
             if redirect:
-                return RedirectResponse("/", status_code=303)
-            return JSONResponse({"error": str(exc), "result": exc.result}, status_code=500)
+                return RedirectResponse(f"/?{urlencode({'scan_error': message})}", status_code=303)
+            return JSONResponse({"error": message, "result": exc.result}, status_code=500)
         if redirect:
             return RedirectResponse("/", status_code=303)
         return result
@@ -211,9 +214,10 @@ def create_app() -> FastAPI:
         try:
             result = run_server_scan_command(settings, owner_key=user.username, mode="courses")
         except ServerScanCommandError as exc:
+            message = format_scan_failure(exc.result, fallback=str(exc))
             if redirect:
-                return RedirectResponse("/", status_code=303)
-            return JSONResponse({"error": str(exc), "result": exc.result}, status_code=500)
+                return RedirectResponse(f"/?{urlencode({'scan_error': message})}", status_code=303)
+            return JSONResponse({"error": message, "result": exc.result}, status_code=500)
         if redirect:
             return RedirectResponse("/", status_code=303)
         return result
@@ -255,9 +259,17 @@ def create_app() -> FastAPI:
             except ScanCancelled:
                 scan_progress.finish_cancelled(active_owner_key, scan_id)
             except ServerScanCommandError as exc:
-                scan_progress.finish_failed(active_owner_key, scan_id, str(exc))
+                scan_progress.finish_failed(
+                    active_owner_key,
+                    scan_id,
+                    format_scan_failure(exc.result, fallback=str(exc)),
+                )
             except Exception as exc:  # noqa: BLE001 - keep the web progress endpoint alive.
-                scan_progress.finish_failed(active_owner_key, scan_id, f"{type(exc).__name__}: {exc}")
+                scan_progress.finish_failed(
+                    active_owner_key,
+                    scan_id,
+                    format_scan_failure(None, fallback=f"{type(exc).__name__}: {exc}"),
+                )
 
         thread = threading.Thread(
             target=run_scan_job,
@@ -596,6 +608,17 @@ def render_message_panel(title: str, message: str, *, back_href: str) -> str:
       <p class="muted">{escape(message)}</p>
       <div class="actions"><a class="button-link" href="{escape(back_href)}">返回</a></div>
     </section>
+    """
+
+
+def render_scan_error_panel(message: str = "") -> str:
+    if not message:
+        return ""
+    return f"""
+    <div class="scan-error" role="alert">
+      <strong>上次扫描失败</strong>
+      <p>{escape(message)}</p>
+    </div>
     """
 
 
@@ -1008,6 +1031,16 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     }}
     .inline-form {{ margin: 0; }}
     .error {{ color: var(--danger); font-weight: 800; }}
+    .scan-error {{
+      margin: 14px 0 16px;
+      border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border));
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+      color: var(--text);
+      padding: 12px 14px;
+    }}
+    .scan-error strong {{ display: block; color: var(--danger); margin-bottom: 4px; }}
+    .scan-error p {{ margin: 0; white-space: pre-line; overflow-wrap: anywhere; }}
     .login-panel, .summary-panel {{ margin-top: 18px; }}
     .summary-note {{ margin: 8px 0 0; }}
     .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 14px; margin-top: 14px; }}
@@ -1024,7 +1057,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
       border-radius: 999px;
     }}
     .progress-fill {{ width: 0%; height: 100%; background: var(--primary); transition: width 180ms ease; }}
-    .progress-message {{ min-height: 22px; margin: 10px 0 0; }}
+    .progress-message {{ min-height: 22px; margin: 10px 0 0; white-space: pre-line; overflow-wrap: anywhere; }}
     .progress-actions {{ display: flex; justify-content: flex-end; margin-top: 10px; }}
     button[disabled] {{ opacity: 0.64; cursor: wait; transform: none; }}
     .remote-panel {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 420px); gap: 24px; align-items: start; }}

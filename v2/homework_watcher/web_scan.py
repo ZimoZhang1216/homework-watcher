@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .scan_errors import format_scan_failure
 from .settings import PROJECT_ROOT, Settings
 
 
@@ -22,11 +23,13 @@ class ServerScanCommandError(RuntimeError):
     result: dict[str, Any] | None = None
 
     def __str__(self) -> str:
+        if self.result:
+            return format_scan_failure(self.result, fallback=self.message)
         if self.returncode is None:
-            return self.message
+            return format_scan_failure(None, fallback=self.message)
         details = compact_process_output(self.stderr or self.stdout)
         suffix = f": {details}" if details else ""
-        return f"{self.message} exit={self.returncode}{suffix}"
+        return format_scan_failure(None, fallback=f"{self.message} exit={self.returncode}{suffix}")
 
 
 def server_scan_command_args(

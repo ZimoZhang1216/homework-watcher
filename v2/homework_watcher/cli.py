@@ -9,6 +9,7 @@ from datetime import datetime
 from .config_loader import load_platform_configs
 from .database import assignment_to_dict, create_session_factory, init_db, list_assignments, list_todos
 from .git_utils import git_commit
+from .scan_errors import NEEDS_ACTION_STATUSES, describe_scan_error_text, describe_scan_exception
 from .scan_service import ScanService, scanner_source_path
 from .scanners.xiaoya import XiaoyaScanner, login_xiaoya
 from .scanners.xiaoya_discovery import xiaoya_course_to_dict
@@ -150,17 +151,21 @@ def cmd_scan_courses(args) -> int:
     platform_summaries: dict[str, dict[str, object]] = {}
     courses: list[dict[str, object]] = []
     errors: list[str] = []
+    error_details: list[dict[str, object]] = []
 
     for platform in requested_platforms:
         if platform != "xiaoya":
-            message = f"{platform}: 暂不支持课程缓存扫描"
-            errors.append(message)
+            advice = describe_scan_error_text(
+                f"{platform}: 暂不支持课程缓存扫描",
+                platform_key=platform,
+            )
+            append_cli_scan_error(errors, error_details, advice)
             platform_summaries[platform] = {
                 "platform_label": platform,
-                "status": "skipped",
-                "message": message,
+                "status": "failed",
+                "message": advice.to_text(),
             }
-            emit_stage(5, message)
+            emit_stage(5, advice.summary)
             continue
 
         emit_stage(5, "小雅：准备扫描课程")
@@ -173,18 +178,22 @@ def cmd_scan_courses(args) -> int:
             )
             courses.extend(rows)
             platform_summaries["xiaoya"] = summary
-            if summary.get("status") == "failed":
-                errors.append(str(summary.get("message") or "小雅课程扫描失败"))
+            if str(summary.get("status") or "") in NEEDS_ACTION_STATUSES:
+                advice = describe_scan_error_text(
+                    str(summary.get("message") or "小雅课程扫描失败"),
+                    platform_key="xiaoya",
+                )
+                append_cli_scan_error(errors, error_details, advice)
             emit_stage(95, str(summary.get("message") or "小雅课程扫描完成"))
         except Exception as exc:  # noqa: BLE001 - keep JSON result parseable for web UI.
-            message = f"xiaoya: {type(exc).__name__}: {exc}"
-            errors.append(message)
+            advice = describe_scan_exception(exc, platform_key="xiaoya")
+            append_cli_scan_error(errors, error_details, advice)
             platform_summaries["xiaoya"] = {
                 "platform_label": "小雅",
                 "status": "failed",
-                "message": message,
+                "message": advice.to_text(),
             }
-            emit_stage(95, message)
+            emit_stage(95, advice.summary)
 
     payload = {
         "scan_id": scan_id,
@@ -194,6 +203,7 @@ def cmd_scan_courses(args) -> int:
         "owner_key": args.user,
         "courses": courses,
         "errors": errors,
+        "error_details": error_details,
         "platform_summaries": platform_summaries,
     }
     if args.progress_jsonl:
@@ -217,6 +227,15 @@ def course_scan_progress_percent(message: str) -> int:
     if "课程扫描完成" in message or "未发现可保存课程" in message:
         return 90
     return 30
+
+
+def append_cli_scan_error(errors: list[str], error_details: list[dict[str, object]], advice) -> None:
+    detail = advice.to_dict()
+    identity = (detail.get("code"), detail.get("platform"), detail.get("summary"))
+    if any((item.get("code"), item.get("platform"), item.get("summary")) == identity for item in error_details):
+        return
+    error_details.append(detail)
+    errors.append(advice.to_text())
 
 
 def cmd_login_xiaoya(args) -> int:
