@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from homework_watcher.app import create_app
 from homework_watcher.auth import (
     AuthError,
     authenticate_user,
@@ -66,6 +71,51 @@ class Phase7AuthTests(unittest.TestCase):
         self.assertEqual(read_session_username(token, "secret", now=1001), "alice")
         self.assertIsNone(read_session_username(token, "wrong-secret", now=1001))
         self.assertIsNone(read_session_username(token, "secret", now=1000 + 15 * 24 * 60 * 60))
+
+    def test_successful_web_login_starts_background_task_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DATABASE_URL": f"sqlite:///{root / 'homework.sqlite3'}",
+                "CONFIG_PATH": str(root / "platforms.yaml"),
+                "DEBUG_DUMP_DIR": str(root / "debug"),
+                "LOGS_DIR": str(root / "logs"),
+                "PLAYWRIGHT_USER_DATA_DIR": str(root / "profiles"),
+                "APP_SECRET_KEY": "test-secret",
+                "PORT": "8080",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                app = create_app()
+                settings = test_settings(tmpdir)
+                init_db(settings)
+                session_factory = create_session_factory(settings)
+                with session_factory() as session:
+                    create_user(session, username="alice", password="password123", display_name="Alice")
+
+                called = threading.Event()
+                call_args: dict[str, object] = {}
+
+                def fake_scan_command(settings, *, owner_key: str, mode: str = "tasks", emit=None, check_cancelled=None):
+                    call_args.update({"owner_key": owner_key, "mode": mode})
+                    called.set()
+                    return {"scan_id": "auto-login-scan", "todos": [], "platform_summaries": {}}
+
+                class FakeLoginRequest:
+                    async def body(self) -> bytes:
+                        return b"username=alice&password=password123"
+
+                with patch("homework_watcher.app.run_server_scan_command", side_effect=fake_scan_command):
+                    login_endpoint = next(
+                        route.endpoint
+                        for route in app.routes
+                        if getattr(route, "path", "") == "/login" and "POST" in getattr(route, "methods", set())
+                    )
+                    response = asyncio.run(login_endpoint(FakeLoginRequest()))
+                    did_start_scan = called.wait(2)
+
+                self.assertEqual(response.status_code, 303)
+                self.assertTrue(did_start_scan, "login did not start a background scan")
+                self.assertEqual(call_args, {"owner_key": "alice", "mode": "tasks"})
 
 
 if __name__ == "__main__":

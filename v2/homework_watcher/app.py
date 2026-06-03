@@ -127,6 +127,8 @@ def create_app() -> FastAPI:
             return redirect_to_login("学号或密码不正确。")
         response = RedirectResponse("/", status_code=303)
         set_auth_cookie(response, user.username, settings)
+        # Keep login fast while refreshing the user's todo list after each successful sign-in.
+        start_background_scan(user.username, mode="tasks")
         return response
 
     @app.post("/register")
