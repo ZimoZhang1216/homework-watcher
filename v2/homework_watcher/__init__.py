@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-APP_VERSION = "V2.25"
+APP_VERSION = "V2.26"
 
 __all__ = ["APP_VERSION"]

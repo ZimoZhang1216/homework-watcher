@@ -9,6 +9,7 @@ from homework_watcher.app import (
     render_assignment_table,
     render_auth_panel,
     render_manual_assignment_panel,
+    render_scan_overview,
     render_scan_guide,
     render_scan_summary,
     render_page_script,
@@ -190,6 +191,38 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("移动端", guide)
         self.assertIn("扫码登录", guide)
 
+    def test_scan_overview_highlights_total_and_nearest_due_task(self) -> None:
+        overview = render_scan_overview(
+            [
+                {
+                    "platform": "小雅",
+                    "course": "结构化学",
+                    "title": "后截止作业",
+                    "due_at": "2026-06-03T23:00:00",
+                },
+                {
+                    "platform": "长江雨课堂",
+                    "course": "大学物理",
+                    "title": "最近截止作业",
+                    "due_at": "2026-06-02T20:00:00",
+                },
+            ],
+            {
+                "scan_id": "scan-test",
+                "finished_at": "2026-06-01T12:00:00",
+                "candidates_count": 6,
+                "db": {"inserted": 2, "updated": 4},
+                "errors": [],
+            },
+        )
+
+        self.assertIn("最近扫描概览", overview)
+        self.assertIn("总代办", overview)
+        self.assertIn(">2<", overview)
+        self.assertIn("最近截止", overview)
+        self.assertIn("最近截止作业", overview)
+        self.assertIn("+2 / 4", overview)
+
     def test_scan_summary_surfaces_xiaoya_status_message(self) -> None:
         class Result:
             platform_summaries = {
@@ -235,6 +268,41 @@ class Phase9ScanProgressTests(unittest.TestCase):
         self.assertIn("小雅：扫描完成", summary)
         self.assertIn(">8<", summary)
         self.assertIn(">12<", summary)
+
+    def test_scan_summary_renders_changjiang_yuketang_summary_next_to_xiaoya(self) -> None:
+        summary = render_scan_summary(
+            {
+                "scan_id": "scan-test",
+                "todos": [{"title": "作业-08"}],
+                "platform_summaries": {
+                    "xiaoya": {
+                        "cached_courses_count": 8,
+                        "merged_courses_count": 8,
+                        "scanned_courses_count": 8,
+                        "failed_courses_count": 0,
+                        "parsed_assignments_count": 12,
+                        "todo_count": 9,
+                        "message": "小雅：扫描完成",
+                    },
+                    "changjiang-yuketang": {
+                        "discovered_courses_count": 3,
+                        "scanned_courses_count": 3,
+                        "failed_courses_count": 1,
+                        "parsed_assignments_count": 5,
+                        "todo_count": 2,
+                        "message": "长江雨课堂完成，识别 5 条作业",
+                    },
+                },
+            }
+        )
+
+        self.assertIn('class="summary-panels"', summary)
+        self.assertIn("小雅最近扫描摘要", summary)
+        self.assertIn("长江雨课堂最近扫描摘要", summary)
+        self.assertIn("长江雨课堂完成，识别 5 条作业", summary)
+        self.assertIn("发现课程", summary)
+        self.assertIn(">3<", summary)
+        self.assertIn(">5<", summary)
 
     def test_web_scan_parses_cli_progress_jsonl(self) -> None:
         line = '{"type":"progress","percent":37,"message":"小雅：扫描课程 结构化学"}'

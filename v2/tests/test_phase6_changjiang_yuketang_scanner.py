@@ -5,9 +5,12 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from homework_watcher.config_loader import PlatformConfig
 from homework_watcher.scan_service import ScanService
+from homework_watcher.scanners.base import ScannerContext
 from homework_watcher.scanners.changjiang_yuketang import (
     CHANGJIANG_PLATFORM_LABEL,
+    ChangjiangYuketangScanner,
     find_yuketang_datetime,
     parse_yuketang_log_text,
 )
@@ -94,6 +97,27 @@ class Phase6ChangjiangYuketangScannerTests(unittest.TestCase):
             service = ScanService(service_settings(tmpdir))
 
         self.assertIn("changjiang-yuketang", service.scanners)
+
+    def test_disabled_yuketang_scan_records_summary_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = ScannerContext(
+                scan_id="scan-test",
+                platform_key="changjiang-yuketang",
+                platform_config=PlatformConfig(
+                    name="changjiang-yuketang",
+                    enabled=False,
+                    base_url="",
+                    known_courses=[],
+                ),
+                progress=lambda _percent, _message: None,
+            )
+            result = ChangjiangYuketangScanner(service_settings(tmpdir)).scan(context)
+
+        self.assertEqual(result, [])
+        summary = context.metadata["changjiang-yuketang"]
+        self.assertEqual(summary["platform_label"], "长江雨课堂")
+        self.assertEqual(summary["status"], "skipped")
+        self.assertIn("未启用", str(summary["message"]))
 
 
 if __name__ == "__main__":

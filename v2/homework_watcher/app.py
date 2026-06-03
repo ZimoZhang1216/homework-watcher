@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
             render_page(
                 "当前待办",
                 f"""
+                {render_scan_overview(todos, latest_result)}
                 <section class="panel">
                   <div class="panel-title">
                     <h2>当前待办</h2>
@@ -687,23 +688,108 @@ def render_manual_assignment_panel(error: str = "") -> str:
     """
 
 
+def render_scan_overview(todos: list[dict[str, object]], result) -> str:
+    if result is None:
+        return ""
+    total_todos = len(todos)
+    nearest = nearest_due_assignment(todos)
+    nearest_text = "暂无待办"
+    nearest_meta = "扫描后没有未完成任务"
+    if nearest is not None:
+        nearest_text = str(nearest.get("title") or "")
+        nearest_meta = " · ".join(
+            part
+            for part in (
+                str(nearest.get("platform") or ""),
+                str(nearest.get("course") or ""),
+                str(nearest.get("due_at") or ""),
+                format_due_distance(nearest.get("due_at")),
+            )
+            if part
+        )
+    parsed_count = parsed_assignment_count_from_scan_result(result)
+    db = scan_result_value(result, "db", {}) or {}
+    inserted = int(db.get("inserted") or 0) if isinstance(db, dict) else 0
+    updated = int(db.get("updated") or 0) if isinstance(db, dict) else 0
+    errors = scan_result_value(result, "errors", []) or []
+    error_count = len(errors) if isinstance(errors, list) else 0
+    finished_at = str(scan_result_value(result, "finished_at", "") or "")
+    finished_label = finished_at.replace("T", " ") if finished_at else "刚刚"
+    status = "有问题需处理" if error_count else "完成"
+    cells = [
+        ("总代办", str(total_todos), "当前未完成任务"),
+        ("最近截止", nearest_text, nearest_meta),
+        ("本次解析", str(parsed_count), "平台作业条目"),
+        ("写入数据库", f"+{inserted} / {updated}", "新增 / 更新"),
+        ("扫描状态", status, finished_label),
+    ]
+    metrics = "".join(
+        f"""
+        <div class="overview-metric">
+          <span class="label">{escape(label)}</span>
+          <strong>{escape(value)}</strong>
+          <small>{escape(note)}</small>
+        </div>
+        """
+        for label, value, note in cells
+    )
+    return f"""
+    <section class="panel overview-panel">
+      <div class="panel-title">
+        <h2>最近扫描概览</h2>
+        <span class="count">{escape(str(total_todos))}</span>
+      </div>
+      <div class="overview-grid">{metrics}</div>
+    </section>
+    """
+
+
 def render_scan_summary(result) -> str:
     if result is None:
         return ""
-    summary = platform_summaries_from_scan_result(result).get("xiaoya", {})
+    summaries = platform_summaries_from_scan_result(result)
+    panels = [
+        render_platform_scan_summary(
+            summaries.get("xiaoya", {}),
+            title="小雅最近扫描摘要",
+            fields=[
+                ("已保存课程", "cached_courses_count"),
+                ("本次发现课程", "discovered_courses_count"),
+                ("待扫描课程", "merged_courses_count"),
+                ("已扫描课程", "scanned_courses_count"),
+                ("失败课程", "failed_courses_count"),
+                ("解析作业", "parsed_assignments_count"),
+                ("当前待办", "todo_count"),
+            ],
+        ),
+        render_platform_scan_summary(
+            summaries.get("changjiang-yuketang", {}),
+            title="长江雨课堂最近扫描摘要",
+            fields=[
+                ("发现课程", "discovered_courses_count"),
+                ("已扫描课程", "scanned_courses_count"),
+                ("失败课程", "failed_courses_count"),
+                ("解析作业", "parsed_assignments_count"),
+                ("当前待办", "todo_count"),
+            ],
+        ),
+    ]
+    panels = [panel for panel in panels if panel]
+    if not panels:
+        return ""
+    return f'<div class="summary-panels">{"".join(panels)}</div>'
+
+
+def render_platform_scan_summary(
+    summary: dict[str, object],
+    *,
+    title: str,
+    fields: list[tuple[str, str]],
+) -> str:
     if not summary:
         return ""
     status_message = str(summary.get("message") or "").strip()
     status_note = f'<p class="muted summary-note">{escape(status_message)}</p>' if status_message else ""
-    fields = [
-        ("已保存课程", "cached_courses_count"),
-        ("本次发现课程", "discovered_courses_count"),
-        ("待扫描课程", "merged_courses_count"),
-        ("已扫描课程", "scanned_courses_count"),
-        ("失败课程", "failed_courses_count"),
-        ("解析作业", "parsed_assignments_count"),
-        ("当前待办", "todo_count"),
-    ]
     cells = "".join(
         f'<div><span class="label">{escape(label)}</span><strong>{escape(str(summary.get(key, 0)))}</strong></div>'
         for label, key in fields
@@ -711,7 +797,7 @@ def render_scan_summary(result) -> str:
     return f"""
     <section class="panel summary-panel">
       <div class="panel-title">
-        <h2>小雅最近扫描摘要</h2>
+        <h2>{escape(title)}</h2>
         <span class="count">{escape(str(summary_count(summary)))}</span>
       </div>
       {status_note}
@@ -725,8 +811,43 @@ def summary_count(summary: dict[str, object]) -> object:
         summary.get("saved_courses_count")
         or summary.get("cached_courses_count")
         or summary.get("merged_courses_count")
+        or summary.get("discovered_courses_count")
+        or summary.get("scanned_courses_count")
+        or summary.get("parsed_assignments_count")
         or 0
     )
+
+
+def nearest_due_assignment(assignments: list[dict[str, object]]) -> dict[str, object] | None:
+    dated: list[tuple[datetime, dict[str, object]]] = []
+    for item in assignments:
+        try:
+            due_at = datetime.fromisoformat(str(item.get("due_at") or ""))
+        except ValueError:
+            continue
+        dated.append((due_at, item))
+    if not dated:
+        return None
+    return min(dated, key=lambda item: item[0])[1]
+
+
+def parsed_assignment_count_from_scan_result(result) -> int:
+    value = scan_result_value(result, "candidates_count", None)
+    if value is not None:
+        return int(value or 0)
+    courses = scan_result_value(result, "courses", None)
+    if isinstance(courses, list):
+        return len(courses)
+    return sum(
+        int(summary.get("parsed_assignments_count") or 0)
+        for summary in platform_summaries_from_scan_result(result).values()
+    )
+
+
+def scan_result_value(result, key: str, default=None):
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
 
 
 def platform_summaries_from_scan_result(result) -> dict[str, dict[str, object]]:
@@ -1041,7 +1162,43 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     }}
     .scan-error strong {{ display: block; color: var(--danger); margin-bottom: 4px; }}
     .scan-error p {{ margin: 0; white-space: pre-line; overflow-wrap: anywhere; }}
+    .overview-panel {{ margin-bottom: 18px; }}
+    .overview-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }}
+    .overview-metric {{
+      min-width: 0;
+      border: 1px solid var(--border);
+      background: var(--surface-subtle);
+      border-radius: 8px;
+      padding: 13px;
+    }}
+    .overview-metric strong {{
+      display: block;
+      margin-top: 4px;
+      color: var(--text);
+      font-size: 20px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }}
+    .overview-metric small {{
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
     .login-panel, .summary-panel {{ margin-top: 18px; }}
+    .summary-panels {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+    }}
+    .summary-panels .summary-panel {{ margin-top: 0; }}
     .summary-note {{ margin: 8px 0 0; }}
     .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 14px; margin-top: 14px; }}
     .summary-grid div {{ border: 1px solid var(--border); background: var(--surface-subtle); border-radius: 8px; padding: 12px; }}
@@ -1098,6 +1255,7 @@ def render_page(title: str, body: str, *, settings, user: CurrentUser | None = N
     @media (max-width: 720px) {{
       main {{ padding: 28px 16px; }}
       .remote-panel, .auth-panel {{ grid-template-columns: 1fr; }}
+      .overview-grid, .summary-panels {{ grid-template-columns: 1fr; }}
       header {{ align-items: flex-start; flex-direction: column; }}
       h1 {{ font-size: 30px; }}
       .panel {{ padding: 18px; }}

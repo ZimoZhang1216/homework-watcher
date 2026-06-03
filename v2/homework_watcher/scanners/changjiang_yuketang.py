@@ -51,7 +51,21 @@ class ChangjiangYuketangScanner:
 
     def scan(self, context) -> list[AssignmentCandidate]:
         config = context.platform_config
+        summary = {
+            "platform_label": CHANGJIANG_PLATFORM_LABEL,
+            "discovered_courses_count": 0,
+            "scanned_courses_count": 0,
+            "failed_courses_count": 0,
+            "parsed_assignments_count": 0,
+            "todo_count": 0,
+            "status": "pending",
+            "message": "",
+        }
+        if hasattr(context, "metadata"):
+            context.metadata[CHANGJIANG_PLATFORM_KEY] = summary
         if config is not None and not config.enabled:
+            summary["status"] = "skipped"
+            summary["message"] = "长江雨课堂未启用，已跳过"
             context.emit(5, "长江雨课堂：未启用，跳过")
             return []
 
@@ -70,16 +84,37 @@ class ChangjiangYuketangScanner:
             try:
                 prefer_student_entry(browser_context)
                 page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
-                return self.scan_course_list(
+                summary["status"] = "running"
+                summary["message"] = "长江雨课堂正在扫描课程作业"
+                assignments = self.scan_course_list(
                     page,
                     start_url=start_url,
                     scan_id=context.scan_id,
                     emit=context.emit,
+                    summary=summary,
                 )
+                summary["parsed_assignments_count"] = len(assignments)
+                summary["todo_count"] = sum(1 for item in assignments if item.is_todo)
+                summary["status"] = "succeeded"
+                summary["message"] = f"长江雨课堂完成，识别 {len(assignments)} 条作业"
+                return assignments
+            except Exception as exc:
+                if summary.get("status") != "failed":
+                    summary["status"] = "failed"
+                    summary["message"] = f"长江雨课堂扫描失败：{type(exc).__name__}: {exc}"
+                raise
             finally:
                 browser_context.close()
 
-    def scan_course_list(self, page: Page, *, start_url: str, scan_id: str, emit) -> list[AssignmentCandidate]:
+    def scan_course_list(
+        self,
+        page: Page,
+        *,
+        start_url: str,
+        scan_id: str,
+        emit,
+        summary: dict[str, object] | None = None,
+    ) -> list[AssignmentCandidate]:
         page.goto(start_url, wait_until="domcontentloaded", timeout=20_000)
         wait_until_ready(page)
         ensure_student_tab(page)
@@ -93,9 +128,14 @@ class ChangjiangYuketangScanner:
                 course=CHANGJIANG_PLATFORM_LABEL,
                 page_no=1,
             )
+            if summary is not None:
+                summary["status"] = "failed"
+                summary["message"] = "长江雨课堂登录态可能失效，请先在网页中打开长江雨课堂登录"
             raise RuntimeError("长江雨课堂登录态可能失效，请先在网页中打开长江雨课堂登录")
 
         course_cards = collect_course_cards(page)
+        if summary is not None:
+            summary["discovered_courses_count"] = len(course_cards)
         emit(25, f"长江雨课堂：发现 {len(course_cards)} 门课程")
         if not course_cards:
             text = safe_body_text(page)
@@ -115,6 +155,10 @@ class ChangjiangYuketangScanner:
                     page_no=1,
                 )
             emit(88, f"长江雨课堂：完成，识别 {len(assignments)} 条")
+            if summary is not None:
+                summary["scanned_courses_count"] = 1 if assignments else 0
+                summary["parsed_assignments_count"] = len(assignments)
+                summary["todo_count"] = sum(1 for item in assignments if item.is_todo)
             return assignments
 
         assignments: list[AssignmentCandidate] = []
@@ -128,9 +172,13 @@ class ChangjiangYuketangScanner:
             cards = page.locator(".studentCol")
             try:
                 if index >= cards.count():
+                    if summary is not None:
+                        summary["failed_courses_count"] = int(summary.get("failed_courses_count") or 0) + 1
                     continue
                 cards.nth(index).click(timeout=8_000)
             except Exception:
+                if summary is not None:
+                    summary["failed_courses_count"] = int(summary.get("failed_courses_count") or 0) + 1
                 continue
             wait_until_ready(page, network_timeout=10_000, settle_ms=1_200)
             text = safe_body_text(page)
@@ -142,6 +190,10 @@ class ChangjiangYuketangScanner:
             )
             emit(percent, f"长江雨课堂：课程 {course_name} 识别 {len(page_assignments)} 条")
             assignments.extend(page_assignments)
+            if summary is not None:
+                summary["scanned_courses_count"] = int(summary.get("scanned_courses_count") or 0) + 1
+                summary["parsed_assignments_count"] = len(assignments)
+                summary["todo_count"] = sum(1 for item in assignments if item.is_todo)
 
         assignments = dedupe_assignments(assignments)
         if not assignments:
@@ -154,6 +206,9 @@ class ChangjiangYuketangScanner:
                 page_no=1,
             )
         emit(88, f"长江雨课堂：完成，识别 {len(assignments)} 条")
+        if summary is not None:
+            summary["parsed_assignments_count"] = len(assignments)
+            summary["todo_count"] = sum(1 for item in assignments if item.is_todo)
         return assignments
 
 
