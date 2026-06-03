@@ -480,7 +480,6 @@ def set_auth_cookie(response, username: str, settings) -> None:
         create_session_token(username, settings.session_secret),
         httponly=True,
         samesite="lax",
-        max_age=14 * 24 * 60 * 60,
     )
 
 

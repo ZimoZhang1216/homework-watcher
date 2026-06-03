@@ -116,6 +116,11 @@ class Phase7AuthTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 303)
                 self.assertTrue(did_start_scan, "login did not start a background scan")
                 self.assertEqual(call_args, {"owner_key": "alice", "mode": "tasks"})
+                cookie = response.headers.get("set-cookie", "")
+                self.assertIn("hw_v2_session=", cookie)
+                self.assertIn("HttpOnly", cookie)
+                self.assertNotIn("Max-Age", cookie)
+                self.assertNotIn("expires=", cookie.lower())
 
 
 if __name__ == "__main__":
